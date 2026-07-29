@@ -9,6 +9,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # The repo's default GITHUB_TOKEN permissions are read-only - without this, the "Publish
+    # latest release" step's `git push origin latest --force` and `gh release create` 403
+    # ("Write access to repository not granted"). Confirmed by inspecting the first real run of
+    # this workflow on a push to main (after PR #11 merged): it built fine but failed here.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
