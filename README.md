@@ -93,3 +93,6 @@ Produces `bin/Debug/net462/QueueUpExporter.dll`.
 - Pushing to QueueUp is a manual menu action, not an automatic background sync.
 - [Issue #3](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/3) - no warning yet when exporting a
   library that hasn't had metadata downloaded.
+- The update notification compares `extension.yaml`'s `Version` against the same field baked into the published
+  release's filename. **Any release-worthy change needs a `Version` bump** in `extension.yaml`, or existing installs
+  won't see it as an update.

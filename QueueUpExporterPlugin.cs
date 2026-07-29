@@ -323,15 +323,34 @@ namespace QueueUpExporter
                     return;
                 }
 
-                // Remove any notification left over from an earlier startup before adding a fresh
-                // one - Add doesn't dedupe by Id itself, and without this a version bump the user
-                // hasn't acted on yet would pile up a duplicate on every single launch.
-                PlayniteApi.Notifications.Remove(UpdateNotificationId);
-                PlayniteApi.Notifications.Add(new NotificationMessage(
+                var notification = new NotificationMessage(
                     UpdateNotificationId,
                     $"A new QueueUp Library Exporter version is available ({remoteVersion}, you have {localVersion}). Click to open the download page.",
                     NotificationType.Info,
-                    () => Process.Start(ReleasePageUrl)));
+                    () => Process.Start(ReleasePageUrl));
+
+                // This runs on the Task.Run background thread OnApplicationStarted kicked off, but
+                // INotificationsAPI.Messages is an ObservableCollection WPF's UI binds to directly -
+                // mutating it off the dispatcher thread throws. Application.Current is null under a
+                // non-UI host (never true inside real Playnite, but cheap to guard).
+                Action addNotification = () =>
+                {
+                    // Remove any notification left over from an earlier startup before adding a
+                    // fresh one - Add doesn't dedupe by Id itself, and without this a version bump
+                    // the user hasn't acted on yet would pile up a duplicate on every launch.
+                    PlayniteApi.Notifications.Remove(UpdateNotificationId);
+                    PlayniteApi.Notifications.Add(notification);
+                };
+
+                var dispatcher = System.Windows.Application.Current?.Dispatcher;
+                if (dispatcher == null || dispatcher.CheckAccess())
+                {
+                    addNotification();
+                }
+                else
+                {
+                    dispatcher.Invoke(addNotification);
+                }
             }
             catch (Exception ex)
             {
@@ -346,6 +365,12 @@ namespace QueueUpExporter
         /// Reads Version straight from this install's own extension.yaml, sitting next to the
         /// compiled DLL - single source of truth rather than a second hardcoded copy, same file
         /// CI's build reads to name the release asset (see .github/workflows/build.yml).
+        ///
+        /// This is also what CheckForUpdate compares against the published release, which is named
+        /// from that same field - a PR that ships a user-visible change without bumping
+        /// extension.yaml's Version republishes the exact same asset name, so every existing install
+        /// computes "no update available" and the notification never fires. Bump Version on any
+        /// release-worthy change.
         /// </summary>
         private static Version ReadLocalVersion()
         {
@@ -379,9 +404,11 @@ namespace QueueUpExporter
         {
             using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) })
             {
-                // GitHub's API rejects requests with no User-Agent header.
-                client.DefaultRequestHeaders.Add("User-Agent", "QueueUpExporter-Playnite-Plugin");
-                client.DefaultRequestHeaders.Add("Accept", "application/vnd.github+json");
+                // GitHub's API rejects requests with no User-Agent header. TryAddWithoutValidation
+                // rather than Add - Add parses/validates the value into a typed header and throws
+                // FormatException on anything it doesn't like; neither header here needs that.
+                client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "QueueUpExporter-Playnite-Plugin");
+                client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/vnd.github+json");
 
                 var json = client.GetStringAsync(ReleaseTagApiUrl).GetAwaiter().GetResult();
                 var release = Serialization.FromJson<GitHubRelease>(json);
