@@ -39,34 +39,14 @@ function ExportQueueUpLibrary
         }
     }
 
-    $export = foreach ($game in $games)
-    {
-        [PSCustomObject]@{
-            Id                = $game.Id.ToString()
-            Name              = $game.Name
-            # Platforms/Source Name is the user-editable display label; SpecificationId is the
-            # stable slug (e.g. "sony_playstation5", "pc_windows") - export both since QueueUp's
-            # import will need the stable id, not just the label.
-            Platforms         = @($game.Platforms | Where-Object { $_ } | ForEach-Object {
-                [PSCustomObject]@{ Name = $_.Name; SpecificationId = $_.SpecificationId }
-            })
-            Source            = if ($game.Source) { $game.Source.Name } else { $null }
-            Roms              = @($game.Roms | Where-Object { $_ } | ForEach-Object { $_.Name })
-            Genres            = @($game.Genres | Where-Object { $_ } | ForEach-Object { $_.Name })
-            Developers        = @($game.Developers | Where-Object { $_ } | ForEach-Object { $_.Name })
-            Publishers        = @($game.Publishers | Where-Object { $_ } | ForEach-Object { $_.Name })
-            ReleaseDate       = if ($game.ReleaseDate) { $game.ReleaseDate.ToString() } else { $null }
-            Playtime          = $game.Playtime
-            LastActivity      = if ($game.LastActivity) { $game.LastActivity.ToString("o") } else { $null }
-            IsInstalled       = $game.IsInstalled
-            InstallDirectory  = $game.InstallDirectory
-            CompletionStatus  = if ($game.CompletionStatus) { $game.CompletionStatus.Name } else { $null }
-            Added             = if ($game.Added) { $game.Added.ToString("o") } else { $null }
-        }
-    }
-
-    $export = @($export)
-    $json = $export | ConvertTo-Json -Depth 5
+    # Every property Playnite's Game object exposes, except binary/media file references (icon,
+    # cover art, background image) - the point of this export is a full view of what QueueUp could
+    # match against, not a curated subset. Using reflection (Select-Object -Property *) rather than
+    # naming fields one by one means this automatically picks up whatever the SDK exposes, including
+    # anything added after this script was written.
+    $MEDIA_FIELDS = @('Icon', 'CoverImage', 'BackgroundImage')
+    $export = @($games | Select-Object -Property * -ExcludeProperty $MEDIA_FIELDS)
+    $json = $export | ConvertTo-Json -Depth 8
 
     $savePath = $PlayniteApi.Dialogs.SaveFile("JSON file|*.json")
     if (-not $savePath)
