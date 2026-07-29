@@ -9,6 +9,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # The repo's default GITHUB_TOKEN permissions are read-only - without this, the "Publish
+    # latest release" step's `git push origin latest --force` and `gh release create` 403
+    # ("Write access to repository not granted"). Confirmed by inspecting the first real run of
+    # this workflow on a push to main (after PR #11 merged): it built fine but failed here.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -29,6 +35,23 @@ jobs:
           name: QueueUpExporter
           path: package/QueueUpExporter
 
+      # .pext is Playnite's own installable-extension format (#13) - drag one onto Playnite's open
+      # window and it installs itself, no manual folder copy needed. It's not a special container:
+      # inspecting a real published extension's .pext confirmed it's a plain zip of extension.yaml +
+      # the compiled DLL (and any other extension files) sitting flat at the archive root, no
+      # wrapping folder - `zip -j` (junk paths) produces exactly that.
+      - name: Build .pext
+        run: |
+          VERSION=$(grep '^Version:' extension.yaml | awk '{print $2}')
+          PEXT_NAME="QueueUpExporter_v${VERSION}.pext"
+          zip -j "$PEXT_NAME" extension.yaml bin/Release/net462/QueueUpExporter.dll
+          echo "PEXT_NAME=$PEXT_NAME" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pext
+          path: ${{ env.PEXT_NAME }}
+
       - name: Publish "latest" release
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         run: |
@@ -37,9 +60,9 @@ jobs:
           gh release delete latest --yes || true
           git tag -f latest
           git push origin latest --force
-          gh release create latest QueueUpExporter.zip \
+          gh release create latest QueueUpExporter.zip "../$PEXT_NAME" \
             --title "Latest build" \
-            --notes "Auto-built from $(git rev-parse --short HEAD). Unzip and drop the QueueUpExporter folder into %AppData%\\Playnite\\Extensions\\, or point Playnite's developer-extension setting at the unzipped folder." \
+            --notes "Auto-built from $(git rev-parse --short HEAD). Easiest install: download the .pext file and drag it onto Playnite's open window - it installs itself. Alternative: unzip QueueUpExporter.zip and drop the folder into %AppData%\\Playnite\\Extensions\\, or point Playnite's developer-extension setting at the unzipped folder." \
             --prerelease
         env:
           GH_TOKEN: ${{ github.token }}
