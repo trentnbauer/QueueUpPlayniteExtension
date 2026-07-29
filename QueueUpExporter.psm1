@@ -45,7 +45,25 @@ function ExportQueueUpLibrary
     # naming fields one by one means this automatically picks up whatever the SDK exposes, including
     # anything added after this script was written.
     $MEDIA_FIELDS = @('Icon', 'CoverImage', 'BackgroundImage')
-    $export = @($games | Select-Object -Property * -ExcludeProperty $MEDIA_FIELDS)
+    $DATE_FIELDS = @('Added', 'Modified', 'LastActivity', 'LastSizeScanDate')
+    $export = foreach ($game in $games)
+    {
+        $obj = $game | Select-Object -Property * -ExcludeProperty $MEDIA_FIELDS
+        # PowerShell 5.1's ConvertTo-Json renders [DateTime] as the legacy ASP.NET "/Date(ms)/"
+        # wire format, not ISO 8601 - confirmed against real export output, not a guess. Force these
+        # back to a plain parseable string. ReleaseDate isn't a plain DateTime (it's a
+        # Playnite.SDK.Models.ReleaseDate struct) - its Day/Month/Year already come through as clean
+        # ints, which is fine as-is, so it's left alone here.
+        foreach ($dateField in $DATE_FIELDS)
+        {
+            if ($obj.$dateField)
+            {
+                $obj.$dateField = $obj.$dateField.ToString("o")
+            }
+        }
+        $obj
+    }
+    $export = @($export)
     $json = $export | ConvertTo-Json -Depth 8
 
     $savePath = $PlayniteApi.Dialogs.SaveFile("JSON file|*.json")
