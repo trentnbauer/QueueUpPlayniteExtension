@@ -15,11 +15,10 @@ extension hasn't migrated to yet - see [issue #4](https://github.com/trentnbauer
 If you already have the older PowerShell version installed, remove it first (Playnite's `Add-ons` manager, or delete
 `QueueUpExporter.psm1` from its extension folder) - leaving both installed alongside each other is untested.
 
-**Note:** the drag-and-drop `.pext` install hasn't been confirmed working for this specific extension yet. If dragging
-the file onto Playnite's window doesn't trigger an install prompt, use the manual install below instead and check
-`%AppData%\Playnite\extensions.log` for why it didn't load.
-
 ### Manual install
+
+Only needed if drag-and-drop doesn't trigger an install prompt for some reason - check
+`%AppData%\Playnite\extensions.log` first if that happens.
 
 1. Download `QueueUpExporter.zip` from the [latest release](../../releases/tag/latest) and unzip it - this gives you a
    folder containing `extension.yaml` and `QueueUpExporter.dll`, no build step needed.
