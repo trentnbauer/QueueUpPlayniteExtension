@@ -5,11 +5,10 @@ Push your Playnite library into QueueUp
 
 This is a barebones exporter (see [issue #1](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/1)). It adds an
 `Extensions > QueueUp > Export library to QueueUp (JSON)` menu item to Playnite that dumps your library to a JSON file, so the
-data shape can be reviewed before wiring up the real push to the QueueUp API.
+data shape can be reviewed before wiring up the real push to the QueueUp API. Verified against a real 241-game library.
 
-It's a PowerShell script extension, which only loads on **Playnite 10**. Playnite 11 removes PowerShell script support
-entirely, so this extension won't load there. Once the export data shape is confirmed and the QueueUp API endpoint is ready,
-the real push integration should likely be rewritten as a C# `GenericPlugin` instead.
+It's a PowerShell script extension, which only loads on **Playnite 10** (see [issue #4](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/4)
+for why that matters going forward).
 
 ## Installing (Playnite desktop, v10)
 
@@ -28,7 +27,5 @@ the real push integration should likely be rewritten as a C# `GenericPlugin` ins
 most of your library. Since knowing the console per game is the actual point of this exporter, re-run with the count left
 blank (full library export) if the sample doesn't include any console/emulated entries.
 
-**Note:** this hasn't been run inside an actual Playnite install yet (no Windows/Playnite environment available in this dev
-sandbox) — the `$PlayniteApi` calls follow the documented SDK surface but are unverified against a live library. If the menu
-item doesn't appear or the export fails, check Playnite's extension load log at `%AppData%\Playnite\extensions.log` (and
-`playnite.log` for script errors) and paste back whatever it shows.
+If the menu item doesn't appear or the export fails, check Playnite's extension load log at `%AppData%\Playnite\extensions.log`
+(and `playnite.log` for script errors).
