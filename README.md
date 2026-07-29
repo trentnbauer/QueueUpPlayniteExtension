@@ -23,8 +23,8 @@ correctly inside a real Playnite install. It'll be deleted for good in a follow-
 ## Building
 
 **Don't have the .NET SDK installed? You don't need it.** Every push to `main` is built by GitHub Actions, which publishes a
-ready-to-use `QueueUpExporter.zip` to the [`latest` release](../../releases/tag/latest) - just download it, unzip, and skip
-straight to step 2 of Installing below.
+ready-to-use `.pext` (and a `QueueUpExporter.zip` fallback) to the [`latest` release](../../releases/tag/latest) - see
+Installing below, no build step needed.
 
 To build it yourself instead, this requires the .NET SDK (8.0+ works fine even though this targets net462 - it
 cross-compiles via the `Microsoft.NETFramework.ReferenceAssemblies` package, no Windows/.NET Framework install needed to
@@ -38,16 +38,22 @@ Produces `bin/Debug/net462/QueueUpExporter.dll`.
 
 ## Installing (Playnite desktop, v10)
 
+**Easiest: drag and drop.** Download `QueueUpExporter_v<version>.pext` from the [latest release](../../releases/tag/latest)
+and drag it onto Playnite's open window - Playnite recognizes `.pext` as its own installable-extension format and installs
+it itself, no manual folder copy needed. **If you already have the older PowerShell version installed**, remove it first
+(Playnite's `Add-ons` manager, or delete `QueueUpExporter.psm1` from its extension folder directly) - leaving the old script
+installed alongside this is untested and best avoided. Then skip to step 2 below.
+
+Alternative, manual install:
+
 1. Get `extension.yaml` and `QueueUpExporter.dll` into a folder together, either by:
-   - **Downloading the [latest release](../../releases/tag/latest)** (`QueueUpExporter.zip`) and unzipping it - no build step
-     needed, this is the easiest option; or
+   - Downloading `QueueUpExporter.zip` from the [latest release](../../releases/tag/latest) and unzipping it - no build step
+     needed; or
    - Building locally (see above) and copying `extension.yaml` + the built `.dll` into a new folder yourself; or
    - Adding this repo folder as a developer extension from Playnite's `For developers` settings (still needs a local
      `dotnet build` first so the `.dll` exists - this option does *not* use the prebuilt release).
 
    Put that folder inside Playnite's `Extensions` directory, e.g. `%AppData%\Playnite\Extensions\QueueUpExporter\`.
-   **If you already have the older PowerShell version installed**, delete `QueueUpExporter.psm1` from that folder first -
-   `extension.yaml` now points at the DLL, but leaving the old script sitting alongside it is untested and best avoided.
 2. Restart Playnite, or reload extensions from developer settings.
 3. Open `Extensions > QueueUp > Export library to QueueUp (JSON)`.
 4. Enter how many games to export (e.g. `10` for a sample), or leave blank for the whole library.
@@ -64,6 +70,12 @@ blank (full library export) if the sample doesn't include any console/emulated e
 (e.g. `2022-12-09T13:09:29.195+11:00`), not the old PowerShell version's `/Date(1234567890)/` bug. If a future Playnite/SDK
 update breaks either of those, check Playnite's extension load log at `%AppData%\Playnite\extensions.log` (and
 `playnite.log` for other errors) - `QueueUpExporter.psm1` (see above) is the fallback until it's fixed.
+
+**`.pext` verification note:** a `.pext` is just a zip of `extension.yaml` + the compiled `.dll` sitting flat at the archive
+root (confirmed by inspecting a real, published extension's release asset - `roob-p/GamepadDesktop-PlayniteExtension`), and
+CI's build of it has that exact shape. What's *not* yet confirmed is Playnite actually accepting a drag-and-dropped `.pext`
+for **this specific extension** - if dragging it onto Playnite's window doesn't trigger an install prompt, fall back to the
+manual install below and check `extensions.log`/`playnite.log` as above.
 
 ## Connecting and pushing to QueueUp
 
