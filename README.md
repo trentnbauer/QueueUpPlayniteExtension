@@ -1,34 +1,81 @@
 # QueueUpPlayniteExtension
-Push your Playnite library into QueueUp
 
-## Current status
+A Playnite extension that pushes your game library into [QueueUp](https://github.com/trentnbauer/QueueUp).
 
-The JSON export ([issue #1](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/1)) is confirmed working end-to-end
-inside a real Playnite install: `Extensions > QueueUp > Export library to QueueUp (JSON)` dumps the library to a file, and a
-real run has verified both that the plugin loads correctly and that date fields serialize as normal ISO strings (not the old
-PowerShell version's `/Date(...)/` bug).
+**Requires Playnite 10.** Playnite 11 dropped script-extension support and needs a different plugin model this
+extension hasn't migrated to yet - see [issue #4](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/4).
 
-The real push ([issue #7](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/7)) is now wired up too, via two more
-menu items - see "Connecting and pushing to QueueUp" below. This part is new and **not yet verified against a live QueueUp
-server** (see that section's verification note).
+## Installing
 
-It's a C# `GenericPlugin` targeting the **Playnite 10 SDK** (.NET Framework 4.6.2) - see
-[issue #4](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/4) for why (Playnite 11 uses an incompatible SDK/plugin
-model; migrating to it is separate future work, not done here).
+1. Download `QueueUpExporter_v<version>.pext` from the [latest release](../../releases/tag/latest).
+2. Drag the file onto Playnite's open window. Playnite recognizes `.pext` as its own installable-extension format and
+   installs it automatically.
+3. Restart Playnite, or reload extensions from developer settings, if it doesn't pick it up right away.
 
-`QueueUpExporter.psm1` (the old PowerShell script version) is still in this repo but is no longer referenced by
-`extension.yaml` - it's kept only as a known-working fallback until the new DLL has been confirmed to load and export
-correctly inside a real Playnite install. It'll be deleted for good in a follow-up once that's confirmed.
+If you already have the older PowerShell version installed, remove it first (Playnite's `Add-ons` manager, or delete
+`QueueUpExporter.psm1` from its extension folder) - leaving both installed alongside each other is untested.
 
-## Building
+**Note:** the drag-and-drop `.pext` install hasn't been confirmed working for this specific extension yet. If dragging
+the file onto Playnite's window doesn't trigger an install prompt, use the manual install below instead and check
+`%AppData%\Playnite\extensions.log` for why it didn't load.
 
-**Don't have the .NET SDK installed? You don't need it.** Every push to `main` is built by GitHub Actions, which publishes a
-ready-to-use `.pext` (and a `QueueUpExporter.zip` fallback) to the [`latest` release](../../releases/tag/latest) - see
-Installing below, no build step needed.
+### Manual install
 
-To build it yourself instead, this requires the .NET SDK (8.0+ works fine even though this targets net462 - it
-cross-compiles via the `Microsoft.NETFramework.ReferenceAssemblies` package, no Windows/.NET Framework install needed to
-build).
+1. Download `QueueUpExporter.zip` from the [latest release](../../releases/tag/latest) and unzip it - this gives you a
+   folder containing `extension.yaml` and `QueueUpExporter.dll`, no build step needed.
+2. Copy that folder into Playnite's `Extensions` directory, e.g. `%AppData%\Playnite\Extensions\QueueUpExporter\`.
+3. Restart Playnite, or reload extensions from developer settings.
+
+(You can also point Playnite's `For developers` settings at this repo folder directly, but that needs a local
+`dotnet build` first so the `.dll` exists - see [Building from source](#building-from-source) below.)
+
+## Using it
+
+Everything lives under `Extensions > QueueUp` in Playnite's menu.
+
+### 1. Connect to QueueUp
+
+**`Connect to QueueUp...`** - paste the connection code from QueueUp's own **Profile Settings** page (the
+`Generate Playnite setup code` button). It's a single `qc1_...` string that packs your server's URL and a personal API
+key. Run this once per Playnite install, or again if you regenerate the code in QueueUp.
+
+### 2. Push your library
+
+**`Push library to QueueUp`** - sends your whole library to QueueUp in one go:
+
+- Dedupes by title, unioning platforms when the same game is reported under multiple sources.
+- Maps each Playnite platform to one of QueueUp's categories (PC, Xbox 360/One/Series, PS3/4/5, Switch/Switch 2) -
+  anything without a match (e.g. a VR headset) is dropped, since QueueUp has no matching category for it.
+- Shows a progress dialog while QueueUp matches titles to games (via IGDB, on QueueUp's server), then reports how many
+  matched, how many need manual review in QueueUp, and how many errored.
+
+This is a manual action, not an automatic sync - re-run it whenever you want to push library changes. Confirmed
+working end-to-end against a real 1445-game library.
+
+**If something goes wrong:** an error dialog quotes QueueUp's response directly - check it for a wrong server URL, an
+expired/revoked connection code, or a network/HTTPS problem. If the push succeeds but the unmatched count looks a lot
+higher than expected, that points to QueueUp's title-matching (or the platform mapping above) rather than anything
+having crashed.
+
+### Exporting to a JSON file (diagnostic)
+
+**`Export library to QueueUp (JSON)`** writes your library to a local file instead of pushing it anywhere - useful for
+inspecting exactly what QueueUp would see, or for debugging. Enter how many games to export (e.g. `10` for a sample),
+or leave blank for the whole library; pick a save location, or cancel to fall back to
+`%TEMP%\queueup-library-export.json`. The export includes every field Playnite's `Game` object exposes except
+cover/background images and icons - platform (display name + stable `SpecificationId` slug), source, per-source
+`GameId` (e.g. Steam AppID), genres, developers/publishers, playtime, install status, and more.
+
+**Tip:** a count-limited sample is taken alphabetically, so it may end up all PC/Steam titles if that's most of your
+library. If you specifically want to check console/emulated entries, leave the count blank for a full export instead.
+
+## Building from source
+
+Every push to `main` is built by GitHub Actions and published to the [`latest` release](../../releases/tag/latest) as
+a `.pext` and a `.zip` - most people don't need to build this themselves.
+
+To build it yourself, you need the .NET SDK (8.0+ works fine even though this targets net462 - it cross-compiles via
+the `Microsoft.NETFramework.ReferenceAssemblies` package, no Windows/.NET Framework install needed):
 
 ```
 dotnet build
@@ -36,73 +83,10 @@ dotnet build
 
 Produces `bin/Debug/net462/QueueUpExporter.dll`.
 
-## Installing (Playnite desktop, v10)
+## Status
 
-**Easiest: drag and drop.** Download `QueueUpExporter_v<version>.pext` from the [latest release](../../releases/tag/latest)
-and drag it onto Playnite's open window - Playnite recognizes `.pext` as its own installable-extension format and installs
-it itself, no manual folder copy needed. **If you already have the older PowerShell version installed**, remove it first
-(Playnite's `Add-ons` manager, or delete `QueueUpExporter.psm1` from its extension folder directly) - leaving the old script
-installed alongside this is untested and best avoided. Then skip to step 2 below.
-
-Alternative, manual install:
-
-1. Get `extension.yaml` and `QueueUpExporter.dll` into a folder together, either by:
-   - Downloading `QueueUpExporter.zip` from the [latest release](../../releases/tag/latest) and unzipping it - no build step
-     needed; or
-   - Building locally (see above) and copying `extension.yaml` + the built `.dll` into a new folder yourself; or
-   - Adding this repo folder as a developer extension from Playnite's `For developers` settings (still needs a local
-     `dotnet build` first so the `.dll` exists - this option does *not* use the prebuilt release).
-
-   Put that folder inside Playnite's `Extensions` directory, e.g. `%AppData%\Playnite\Extensions\QueueUpExporter\`.
-2. Restart Playnite, or reload extensions from developer settings.
-3. Open `Extensions > QueueUp > Export library to QueueUp (JSON)`.
-4. Enter how many games to export (e.g. `10` for a sample), or leave blank for the whole library.
-5. Pick a save location (or cancel to fall back to `%TEMP%\queueup-library-export.json`). The exported JSON includes every
-   field Playnite's `Game` object exposes except cover/background images and icons - platform(s) (display name + stable
-   `SpecificationId` slug), source, per-source `GameId` (e.g. Steam AppID), genres, developers/publishers, playtime, install
-   status, and everything else, for a full view of what's available to match against QueueUp.
-
-**Tip:** if you sample with a count (e.g. `10`), games are taken alphabetically, which may all be PC/Steam titles if that's
-most of your library. Since knowing the console per game is the actual point of this exporter, re-run with the count left
-blank (full library export) if the sample doesn't include any console/emulated entries.
-
-**Verified:** confirmed against a real 1107-game library - the menu item loads, and dates come out as normal ISO strings
-(e.g. `2022-12-09T13:09:29.195+11:00`), not the old PowerShell version's `/Date(1234567890)/` bug. If a future Playnite/SDK
-update breaks either of those, check Playnite's extension load log at `%AppData%\Playnite\extensions.log` (and
-`playnite.log` for other errors) - `QueueUpExporter.psm1` (see above) is the fallback until it's fixed.
-
-**`.pext` verification note:** a `.pext` is just a zip of `extension.yaml` + the compiled `.dll` sitting flat at the archive
-root (confirmed by inspecting a real, published extension's release asset - `roob-p/GamepadDesktop-PlayniteExtension`), and
-CI's build of it has that exact shape. What's *not* yet confirmed is Playnite actually accepting a drag-and-dropped `.pext`
-for **this specific extension** - if dragging it onto Playnite's window doesn't trigger an install prompt, fall back to the
-manual install below and check `extensions.log`/`playnite.log` as above.
-
-## Connecting and pushing to QueueUp
-
-Two more menu items under `Extensions > QueueUp` do the real push described in
-[issue #7](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/7):
-
-- **`Connect to QueueUp...`** - paste the connection code from QueueUp's own Profile Settings (`Generate Playnite setup
-  code` button - QueueUp issues #441/#448). It's a single `qc1_...` string that packs your server's URL and a personal API
-  key; this decodes it and saves the result to this plugin's own data folder (not plaintext next to the extension code).
-  Run this once per install (or again if you regenerate the code in QueueUp).
-- **`Push library to QueueUp`** - dedupes your library by title (unioning platforms for the same title reported under
-  multiple sources/entries), maps each Playnite platform name to one of QueueUp's platform categories (PC, Xbox 360/One/
-  Series, PS3/4/5, Switch/Switch 2 - anything else, like a VR headset, is dropped since QueueUp has no matching category),
-  and submits it to QueueUp's bulk import endpoint. A progress dialog polls until QueueUp finishes matching titles to games
-  (via IGDB, server-side - this extension never resolves that itself), then reports how many matched, how many need manual
-  review in QueueUp (unresolved titles), and how many errored.
-
-This is a manual menu action for now, not an automatic sync - re-run it whenever you want to push library changes.
-
-**Verification note:** this compiles cleanly against the real `PlayniteSDK` 6.15.0 types and the platform-mapping/dedupe
-logic has been tested in isolation (all keyword-mapping and dedupe/trim/drop cases pass), but the actual HTTP push has
-**not** been run against a live QueueUp server - there's no QueueUp instance reachable from this extension's dev
-environment. On first real use, specifically check:
-- **`Connect to QueueUp...` accepts a real connection code** and doesn't error decoding it.
-- **`Push library to QueueUp` actually reaches your server** - a wrong URL, an expired/revoked key, or a firewall/HTTPS
-  issue would surface as an error dialog quoting QueueUp's response; a successful push should report matched/unmatched/
-  errored counts that roughly add up to your library size (minus anything with no recognized platform, which no PC/Xbox/
-  PlayStation/Switch platform).
-- **The unmatched count isn't way higher than expected** - that would suggest the title-matching on QueueUp's side (or the
-  platform mapping here) needs work, not that anything crashed.
+- It's a C# `GenericPlugin` targeting the Playnite 10 SDK (PlayniteSDK 6.15.0, .NET Framework 4.6.2) - see
+  [issue #4](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/4) for why Playnite 11 isn't supported yet.
+- Pushing to QueueUp is a manual menu action, not an automatic background sync.
+- [Issue #3](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/3) - no warning yet when exporting a
+  library that hasn't had metadata downloaded.
