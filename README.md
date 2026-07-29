@@ -3,9 +3,14 @@ Push your Playnite library into QueueUp
 
 ## Current status
 
-This is a barebones exporter (see [issue #1](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/1)). It adds an
-`Extensions > QueueUp > Export library to QueueUp (JSON)` menu item to Playnite that dumps your library to a JSON file, so the
-data shape can be reviewed before wiring up the real push to the QueueUp API. Verified against a real 1107-game library.
+The JSON export ([issue #1](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/1)) is confirmed working end-to-end
+inside a real Playnite install: `Extensions > QueueUp > Export library to QueueUp (JSON)` dumps the library to a file, and a
+real run has verified both that the plugin loads correctly and that date fields serialize as normal ISO strings (not the old
+PowerShell version's `/Date(...)/` bug).
+
+The real push ([issue #7](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/7)) is now wired up too, via two more
+menu items - see "Connecting and pushing to QueueUp" below. This part is new and **not yet verified against a live QueueUp
+server** (see that section's verification note).
 
 It's a C# `GenericPlugin` targeting the **Playnite 10 SDK** (.NET Framework 4.6.2) - see
 [issue #4](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/4) for why (Playnite 11 uses an incompatible SDK/plugin
@@ -46,19 +51,37 @@ Produces `bin/Debug/net462/QueueUpExporter.dll`.
 most of your library. Since knowing the console per game is the actual point of this exporter, re-run with the count left
 blank (full library export) if the sample doesn't include any console/emulated entries.
 
-**Verification note:** this compiles cleanly against the real Playnite 10 SDK (`PlayniteSDK` 6.15.0) and its reflection-based
-export logic has been runtime-tested directly (via `mono`, outside Playnite) against a real `Game` instance - but it hasn't
-been run inside an actual Playnite process, since that's a Windows desktop app with no way to launch/test it in this
-extension's dev environment. If the menu item doesn't appear or the export fails, check Playnite's extension load log at
-`%AppData%\Playnite\extensions.log` (and `playnite.log` for other errors).
+**Verified:** confirmed against a real 1107-game library - the menu item loads, and dates come out as normal ISO strings
+(e.g. `2022-12-09T13:09:29.195+11:00`), not the old PowerShell version's `/Date(1234567890)/` bug. If a future Playnite/SDK
+update breaks either of those, check Playnite's extension load log at `%AppData%\Playnite\extensions.log` (and
+`playnite.log` for other errors) - `QueueUpExporter.psm1` (see above) is the fallback until it's fixed.
 
-On first real run, specifically check:
-- **Does the `Extensions > QueueUp > Export library to QueueUp (JSON)` menu item appear at all** - this confirms the plugin
-  loaded and the GUID/manifest are valid.
-- **Do date fields (`Added`, `Modified`, `LastActivity`, etc.) come out as normal ISO-style strings**, not something like
-  `/Date(1234567890)/`. The old PowerShell version's `ConvertTo-Json` had exactly that bug; whether Playnite's own SDK
-  serializer (`Serialization.ToJson`, used here) has the same issue is untested - it couldn't be exercised outside a live
-  Playnite host in this sandbox (it throws `NullReferenceException` standalone, since it needs a serializer injected by the
-  running app).
+## Connecting and pushing to QueueUp
 
-If either of those looks wrong, `QueueUpExporter.psm1` (see above) is the fallback until it's fixed.
+Two more menu items under `Extensions > QueueUp` do the real push described in
+[issue #7](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/7):
+
+- **`Connect to QueueUp...`** - paste the connection code from QueueUp's own Profile Settings (`Generate Playnite setup
+  code` button - QueueUp issues #441/#448). It's a single `qc1_...` string that packs your server's URL and a personal API
+  key; this decodes it and saves the result to this plugin's own data folder (not plaintext next to the extension code).
+  Run this once per install (or again if you regenerate the code in QueueUp).
+- **`Push library to QueueUp`** - dedupes your library by title (unioning platforms for the same title reported under
+  multiple sources/entries), maps each Playnite platform name to one of QueueUp's platform categories (PC, Xbox 360/One/
+  Series, PS3/4/5, Switch/Switch 2 - anything else, like a VR headset, is dropped since QueueUp has no matching category),
+  and submits it to QueueUp's bulk import endpoint. A progress dialog polls until QueueUp finishes matching titles to games
+  (via IGDB, server-side - this extension never resolves that itself), then reports how many matched, how many need manual
+  review in QueueUp (unresolved titles), and how many errored.
+
+This is a manual menu action for now, not an automatic sync - re-run it whenever you want to push library changes.
+
+**Verification note:** this compiles cleanly against the real `PlayniteSDK` 6.15.0 types and the platform-mapping/dedupe
+logic has been tested in isolation (all keyword-mapping and dedupe/trim/drop cases pass), but the actual HTTP push has
+**not** been run against a live QueueUp server - there's no QueueUp instance reachable from this extension's dev
+environment. On first real use, specifically check:
+- **`Connect to QueueUp...` accepts a real connection code** and doesn't error decoding it.
+- **`Push library to QueueUp` actually reaches your server** - a wrong URL, an expired/revoked key, or a firewall/HTTPS
+  issue would surface as an error dialog quoting QueueUp's response; a successful push should report matched/unmatched/
+  errored counts that roughly add up to your library size (minus anything with no recognized platform, which no PC/Xbox/
+  PlayStation/Switch platform).
+- **The unmatched count isn't way higher than expected** - that would suggest the title-matching on QueueUp's side (or the
+  platform mapping here) needs work, not that anything crashed.
