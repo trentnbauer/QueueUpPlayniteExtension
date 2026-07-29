@@ -327,7 +327,7 @@ namespace QueueUpExporter
                     UpdateNotificationId,
                     $"A new QueueUp Library Exporter version is available ({remoteVersion}, you have {localVersion}). Click to open the download page.",
                     NotificationType.Info,
-                    () => Process.Start(ReleasePageUrl));
+                    OpenReleasePage);
 
                 // This runs on the Task.Run background thread OnApplicationStarted kicked off, but
                 // INotificationsAPI.Messages is an ObservableCollection WPF's UI binds to directly -
@@ -358,6 +358,25 @@ namespace QueueUpExporter
                 // ask for this, so a failure (offline, GitHub down, rate-limited) should just be
                 // silent, same "quiet failure" reasoning as the export's own per-property try/catch.
                 LogManager.GetLogger().Warn(ex, "QueueUp update check failed.");
+            }
+        }
+
+        /// <summary>
+        /// The update notification's click action - runs later, on Playnite's UI thread when the
+        /// user actually clicks it, well outside CheckForUpdate's own try/catch. Process.Start on a
+        /// bare URL throws Win32Exception if there's no registered browser/URL handler; same "don't
+        /// surface an error dialog over something the user didn't explicitly ask to run" reasoning
+        /// as CheckForUpdate itself.
+        /// </summary>
+        private static void OpenReleasePage()
+        {
+            try
+            {
+                Process.Start(ReleasePageUrl);
+            }
+            catch (Exception ex)
+            {
+                LogManager.GetLogger().Warn(ex, "Could not open the QueueUp Library Exporter release page.");
             }
         }
 
