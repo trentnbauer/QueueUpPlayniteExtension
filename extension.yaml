@@ -1,0 +1,6 @@
+Id: queueup_library_exporter
+Name: QueueUp Library Exporter
+Author: QueueUp
+Version: 0.1.0
+Module: QueueUpExporter.psm1
+Type: Script
