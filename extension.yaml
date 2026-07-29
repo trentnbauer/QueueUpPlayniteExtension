@@ -1,6 +1,6 @@
 Id: queueup_library_exporter
 Name: QueueUp Library Exporter
 Author: QueueUp
-Version: 0.2.0
+Version: 0.3.0
 Module: QueueUpExporter.dll
 Type: GenericPlugin

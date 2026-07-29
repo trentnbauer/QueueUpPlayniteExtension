@@ -2,7 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Reflection;
+using System.Text;
+using System.Threading;
 using Playnite.SDK;
 using Playnite.SDK.Data;
 using Playnite.SDK.Models;
@@ -30,6 +35,37 @@ namespace QueueUpExporter
             "BackgroundImage",
         };
 
+        // Wire format from QueueUp's connectionCode.ts: `qc1_` + base64(JSON({url, key})). The `1`
+        // is a version marker on QueueUp's side - a future breaking change bumps to `qc2_`, which
+        // this extension doesn't understand and should reject rather than silently misparse.
+        private const string ConnectionCodePrefix = "qc1_";
+
+        // Keyword -> QueueUp RoomPlatform (packages/shared/src/types.ts). Order matters: more
+        // specific keywords ("switch 2", "xbox series") must be checked before substrings of them
+        // ("switch", implicitly via distinct "xbox" not being listed at all). Deliberately no bare
+        // "xbox" or "playstation" fallback - guessing the wrong console generation is worse than
+        // leaving a title's platform unmapped (it just won't count toward ownership on that system
+        // until QueueUp resolves it some other way).
+        private static readonly KeyValuePair<string, string>[] PlatformKeywordMap =
+        {
+            new KeyValuePair<string, string>("switch 2", "switch2"),
+            new KeyValuePair<string, string>("switch2", "switch2"),
+            new KeyValuePair<string, string>("switch", "switch"),
+            new KeyValuePair<string, string>("xbox series", "xbox_series"),
+            new KeyValuePair<string, string>("xbox 360", "xbox_360"),
+            new KeyValuePair<string, string>("xbox one", "xbox_one"),
+            new KeyValuePair<string, string>("playstation 5", "ps5"),
+            new KeyValuePair<string, string>("ps5", "ps5"),
+            new KeyValuePair<string, string>("playstation 4", "ps4"),
+            new KeyValuePair<string, string>("ps4", "ps4"),
+            new KeyValuePair<string, string>("playstation 3", "ps3"),
+            new KeyValuePair<string, string>("ps3", "ps3"),
+            new KeyValuePair<string, string>("windows", "pc"),
+            new KeyValuePair<string, string>("linux", "pc"),
+            new KeyValuePair<string, string>("mac", "pc"),
+            new KeyValuePair<string, string>("pc", "pc"),
+        };
+
         public override Guid Id { get; } = Guid.Parse("ffbe3993-60a1-49e6-a228-4cf7a130ce44");
 
         public QueueUpExporterPlugin(IPlayniteAPI api) : base(api)
@@ -43,6 +79,20 @@ namespace QueueUpExporter
                 Description = "Export library to QueueUp (JSON)",
                 MenuSection = "@QueueUp",
                 Action = ExportLibrary,
+            };
+
+            yield return new MainMenuItem
+            {
+                Description = "Connect to QueueUp...",
+                MenuSection = "@QueueUp",
+                Action = ConnectToQueueUp,
+            };
+
+            yield return new MainMenuItem
+            {
+                Description = "Push library to QueueUp",
+                MenuSection = "@QueueUp",
+                Action = PushLibrary,
             };
         }
 
@@ -77,6 +127,323 @@ namespace QueueUpExporter
 
             File.WriteAllText(savePath, json);
             PlayniteApi.Dialogs.ShowMessage($"Exported {export.Count} games to:\n{savePath}");
+        }
+
+        /// <summary>
+        /// Decodes a pasted `qc1_...` connection code (from QueueUp's Profile Settings > "Generate
+        /// Playnite setup code") and persists it via Playnite's own plugin-settings storage (the
+        /// plugin's user-data folder, not plaintext next to the extension's code - see #7).
+        /// </summary>
+        private void ConnectToQueueUp(MainMenuItemActionArgs args)
+        {
+            var input = PlayniteApi.Dialogs.SelectString(
+                "Paste the connection code from QueueUp's Profile Settings (\"Generate Playnite setup code\").",
+                "Connect to QueueUp",
+                string.Empty);
+
+            if (!input.Result || string.IsNullOrWhiteSpace(input.SelectedString))
+            {
+                return;
+            }
+
+            var code = input.SelectedString.Trim();
+            if (!code.StartsWith(ConnectionCodePrefix, StringComparison.Ordinal))
+            {
+                PlayniteApi.Dialogs.ShowErrorMessage(
+                    $"That doesn't look like a QueueUp connection code (should start with \"{ConnectionCodePrefix}\").",
+                    "Connect to QueueUp");
+                return;
+            }
+
+            ConnectionCode decoded = null;
+            try
+            {
+                var json = Encoding.UTF8.GetString(Convert.FromBase64String(code.Substring(ConnectionCodePrefix.Length)));
+                decoded = Serialization.FromJson<ConnectionCode>(json);
+            }
+            catch
+            {
+                // decoded stays null - handled by the validity check below.
+            }
+
+            if (decoded == null || string.IsNullOrWhiteSpace(decoded.Url) || string.IsNullOrWhiteSpace(decoded.Key))
+            {
+                PlayniteApi.Dialogs.ShowErrorMessage("Couldn't parse that connection code.", "Connect to QueueUp");
+                return;
+            }
+
+            SavePluginSettings(new QueueUpConnectionSettings { Url = decoded.Url.TrimEnd('/'), Key = decoded.Key });
+            PlayniteApi.Dialogs.ShowMessage($"Connected to QueueUp at {decoded.Url}.", "Connect to QueueUp");
+        }
+
+        /// <summary>
+        /// Builds the deduped/platform-mapped payload and pushes it to QueueUp's bulk import
+        /// endpoint (QueueUp#450/#453), then polls for completion. Runs inside a global-progress
+        /// dialog since a big non-Steam library can take a while to resolve server-side.
+        /// </summary>
+        private void PushLibrary(MainMenuItemActionArgs args)
+        {
+            var settings = LoadPluginSettings<QueueUpConnectionSettings>();
+            if (settings == null || string.IsNullOrWhiteSpace(settings.Url) || string.IsNullOrWhiteSpace(settings.Key))
+            {
+                PlayniteApi.Dialogs.ShowErrorMessage(
+                    "Not connected to QueueUp yet - use \"Connect to QueueUp...\" first to paste a connection code from Profile Settings.",
+                    "Push library to QueueUp");
+                return;
+            }
+
+            var entries = BuildImportEntries(PlayniteApi.Database.Games);
+            if (entries.Count == 0)
+            {
+                PlayniteApi.Dialogs.ShowMessage(
+                    "No games with a recognized platform (PC/Xbox/PlayStation/Switch) found to push.",
+                    "Push library to QueueUp");
+                return;
+            }
+
+            string resultMessage = null;
+            var isError = false;
+
+            PlayniteApi.Dialogs.ActivateGlobalProgress(
+                progressArgs =>
+                {
+                    try
+                    {
+                        using (var client = CreateHttpClient(settings))
+                        {
+                            var requestJson = Serialization.ToJson(new ImportRequestBody { Entries = entries });
+                            var response = client
+                                .PostAsync("api/v1/library/import-playnite", new StringContent(requestJson, Encoding.UTF8, "application/json"))
+                                .GetAwaiter()
+                                .GetResult();
+                            var responseBody = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+
+                            if (!response.IsSuccessStatusCode)
+                            {
+                                resultMessage = DescribeError(response.StatusCode, responseBody);
+                                isError = true;
+                                return;
+                            }
+
+                            var started = Serialization.FromJson<ImportStartedResponse>(responseBody);
+                            progressArgs.IsIndeterminate = true;
+                            progressArgs.Text = $"Sent {entries.Count} titles ({started.ConsideredCount} considered). Waiting for QueueUp to finish matching...";
+
+                            ImportProgress progress = null;
+                            while (true)
+                            {
+                                if (progressArgs.CancelToken.IsCancellationRequested)
+                                {
+                                    resultMessage = "Push canceled locally - QueueUp will keep processing what was already sent; check back in QueueUp later.";
+                                    return;
+                                }
+
+                                Thread.Sleep(1500);
+
+                                var progressResponse = client.GetAsync("api/v1/library/import-playnite/progress").GetAwaiter().GetResult();
+                                var progressBody = progressResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                                if (!progressResponse.IsSuccessStatusCode)
+                                {
+                                    resultMessage = DescribeError(progressResponse.StatusCode, progressBody);
+                                    isError = true;
+                                    return;
+                                }
+
+                                progress = Serialization.FromJson<ImportProgressResponse>(progressBody)?.Progress;
+                                if (progress == null)
+                                {
+                                    continue;
+                                }
+
+                                progressArgs.Text = $"Matched {progress.Matched}, unmatched {progress.Unmatched}, errored {progress.Errored} of {progress.ConsideredCount}...";
+                                if (progress.Done)
+                                {
+                                    break;
+                                }
+                            }
+
+                            resultMessage =
+                                $"Push complete: {progress.Matched} matched, {progress.Unmatched} unresolved (review in QueueUp's Profile Settings), " +
+                                $"{progress.Errored} errored, out of {progress.ConsideredCount} considered.";
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        resultMessage = $"Push failed: {ex.Message}";
+                        isError = true;
+                    }
+                },
+                new GlobalProgressOptions("Pushing library to QueueUp...", true) { IsIndeterminate = false });
+
+            if (resultMessage == null)
+            {
+                return;
+            }
+
+            if (isError)
+            {
+                PlayniteApi.Dialogs.ShowErrorMessage(resultMessage, "Push library to QueueUp");
+            }
+            else
+            {
+                PlayniteApi.Dialogs.ShowMessage(resultMessage, "Push library to QueueUp");
+            }
+        }
+
+        private static HttpClient CreateHttpClient(QueueUpConnectionSettings settings)
+        {
+            var client = new HttpClient { BaseAddress = new Uri(settings.Url.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(30) };
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", settings.Key);
+            return client;
+        }
+
+        /// <summary>
+        /// QueueUp's error responses are always `{"error": "..."}` (server/src/plugins/auth.ts'
+        /// global error handler) below 500, and a generic message at/above it - surface whichever
+        /// text is available rather than a bare status code.
+        /// </summary>
+        private static string DescribeError(HttpStatusCode statusCode, string body)
+        {
+            string message = null;
+            try
+            {
+                message = Serialization.FromJson<ErrorResponse>(body)?.Error;
+            }
+            catch
+            {
+                // Fall through to the raw body below.
+            }
+
+            return $"QueueUp returned {(int)statusCode} {statusCode}: {message ?? body}";
+        }
+
+        private static string MapPlatformName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+            {
+                return null;
+            }
+
+            var lower = name.ToLowerInvariant();
+            foreach (var mapping in PlatformKeywordMap)
+            {
+                if (lower.Contains(mapping.Key))
+                {
+                    return mapping.Value;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Dedupes/unions by title (QueueUp's own dedupeImportEntries is only a defensive backstop -
+        /// see its doc comment referencing this issue), and drops any title that maps to zero
+        /// recognized platforms rather than sending an ownership claim with nothing behind it.
+        /// </summary>
+        private static List<ImportEntry> BuildImportEntries(IEnumerable<Game> games)
+        {
+            var byTitle = new Dictionary<string, HashSet<string>>();
+            foreach (var game in games)
+            {
+                if (string.IsNullOrWhiteSpace(game.Name))
+                {
+                    continue;
+                }
+
+                var title = game.Name.Trim();
+                if (!byTitle.TryGetValue(title, out var platforms))
+                {
+                    platforms = new HashSet<string>();
+                    byTitle[title] = platforms;
+                }
+
+                if (game.Platforms == null)
+                {
+                    continue;
+                }
+
+                foreach (var platform in game.Platforms)
+                {
+                    var mapped = MapPlatformName(platform?.Name);
+                    if (mapped != null)
+                    {
+                        platforms.Add(mapped);
+                    }
+                }
+            }
+
+            return byTitle
+                .Where(kv => kv.Value.Count > 0)
+                .Select(kv => new ImportEntry { Title = kv.Key, Platforms = kv.Value.ToList() })
+                .ToList();
+        }
+
+        private class QueueUpConnectionSettings
+        {
+            public string Url { get; set; }
+
+            public string Key { get; set; }
+        }
+
+        private class ConnectionCode
+        {
+            [SerializationPropertyName("url")]
+            public string Url { get; set; }
+
+            [SerializationPropertyName("key")]
+            public string Key { get; set; }
+        }
+
+        private class ImportEntry
+        {
+            [SerializationPropertyName("title")]
+            public string Title { get; set; }
+
+            [SerializationPropertyName("platforms")]
+            public List<string> Platforms { get; set; }
+        }
+
+        private class ImportRequestBody
+        {
+            [SerializationPropertyName("entries")]
+            public List<ImportEntry> Entries { get; set; }
+        }
+
+        private class ImportStartedResponse
+        {
+            [SerializationPropertyName("consideredCount")]
+            public int ConsideredCount { get; set; }
+        }
+
+        private class ImportProgressResponse
+        {
+            [SerializationPropertyName("progress")]
+            public ImportProgress Progress { get; set; }
+        }
+
+        private class ImportProgress
+        {
+            [SerializationPropertyName("consideredCount")]
+            public int ConsideredCount { get; set; }
+
+            [SerializationPropertyName("matched")]
+            public int Matched { get; set; }
+
+            [SerializationPropertyName("unmatched")]
+            public int Unmatched { get; set; }
+
+            [SerializationPropertyName("errored")]
+            public int Errored { get; set; }
+
+            [SerializationPropertyName("done")]
+            public bool Done { get; set; }
+        }
+
+        private class ErrorResponse
+        {
+            [SerializationPropertyName("error")]
+            public string Error { get; set; }
         }
 
         /// <summary>
