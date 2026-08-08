@@ -109,8 +109,9 @@ Produces `bin/Debug/net462/QueueUpExporter.dll`.
   [issue #4](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/4) for why Playnite 11 isn't supported yet.
 - Pushing to QueueUp auto-syncs on library changes/startup (at most once an hour), or run `Push library to QueueUp`
   by hand any time; `Enable Auto-Sync`/`Disable Auto-Sync` toggles the automatic side.
-- [Issue #3](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/3) - no warning yet when exporting a
-  library that hasn't had metadata downloaded.
+- Exporting or pushing a library where most games have no genres/developers/publishers ([issue #3](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/3))
+  warns that Playnite's "Download Metadata" (Library menu, or right-click a selection) probably hasn't been run yet,
+  and lets you cancel or proceed anyway; auto-sync only logs this rather than popping a dialog.
 - The update notification compares `extension.yaml`'s `Version` against the same field baked into the published
   release's filename. **Any release-worthy change needs a `Version` bump** in `extension.yaml`, or existing installs
   won't see it as an update.
