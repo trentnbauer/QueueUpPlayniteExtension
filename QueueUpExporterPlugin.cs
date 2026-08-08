@@ -497,8 +497,8 @@ namespace QueueUpExporter
         }
 
         private const string UpdateNotificationId = "queueup_exporter_update_available";
-        private const string ReleaseTagApiUrl = "https://api.github.com/repos/trentnbauer/QueueUpPlayniteExtension/releases/tags/latest";
-        private const string ReleasePageUrl = "https://github.com/trentnbauer/QueueUpPlayniteExtension/releases/tag/latest";
+        private const string LatestReleaseApiUrl = "https://api.github.com/repos/trentnbauer/QueueUpPlayniteExtension/releases/latest";
+        private const string ReleasePageUrl = "https://github.com/trentnbauer/QueueUpPlayniteExtension/releases/latest";
 
         private void CheckForUpdate()
         {
@@ -601,11 +601,13 @@ namespace QueueUpExporter
         }
 
         /// <summary>
-        /// GitHub's own "latest release" API endpoint excludes prereleases, and this repo's only
-        /// release (tag "latest", rebuilt on every push to main) is marked prerelease - fetches it
-        /// by tag instead. Neither the release name nor the tag carries a version of its own (both
-        /// are static "Latest build"/"latest"); the only place a version shows up is the `.pext`
-        /// asset's filename, named from extension.yaml's Version field by the same build.
+        /// GitHub's own "latest release" API endpoint returns the most recent non-prerelease
+        /// release, which is exactly the versioned (vX.Y.Z) release the build workflow publishes
+        /// once per bumped extension.yaml Version - it naturally skips the "latest" bleeding-edge
+        /// alias tag, since that one's always marked prerelease. Neither the release name nor the
+        /// tag is parsed here even so: the only place a version shows up in a form this can
+        /// directly Version.TryParse is the `.pext` asset's filename, named from extension.yaml's
+        /// Version field by the same build.
         /// </summary>
         private static Version FetchLatestReleaseVersion()
         {
@@ -617,7 +619,7 @@ namespace QueueUpExporter
                 client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "QueueUpExporter-Playnite-Plugin");
                 client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/vnd.github+json");
 
-                var json = client.GetStringAsync(ReleaseTagApiUrl).GetAwaiter().GetResult();
+                var json = client.GetStringAsync(LatestReleaseApiUrl).GetAwaiter().GetResult();
                 var release = Serialization.FromJson<GitHubRelease>(json);
                 var pextAsset = release?.Assets?.FirstOrDefault(a =>
                     a.Name != null &&

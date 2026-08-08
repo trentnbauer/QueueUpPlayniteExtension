@@ -7,7 +7,7 @@ extension hasn't migrated to yet - see [issue #4](https://github.com/trentnbauer
 
 ## Installing
 
-1. Download `QueueUpExporter_v<version>.pext` from the [latest release](../../releases/tag/latest).
+1. Download `QueueUpExporter_v<version>.pext` from the [latest release](../../releases/latest).
 2. Drag the file onto Playnite's open window. Playnite recognizes `.pext` as its own installable-extension format and
    installs it automatically.
 3. Restart Playnite, or reload extensions from developer settings, if it doesn't pick it up right away.
@@ -24,7 +24,7 @@ page. It can't install the update for you; drag the new `.pext` in the same way 
 Only needed if drag-and-drop doesn't trigger an install prompt for some reason - check
 `%AppData%\Playnite\extensions.log` first if that happens.
 
-1. Download `QueueUpExporter.zip` from the [latest release](../../releases/tag/latest) and unzip it - this gives you a
+1. Download `QueueUpExporter.zip` from the [latest release](../../releases/latest) and unzip it - this gives you a
    folder containing `extension.yaml` and `QueueUpExporter.dll`, no build step needed.
 2. Copy that folder into Playnite's `Extensions` directory, e.g. `%AppData%\Playnite\Extensions\QueueUpExporter\`.
 3. Restart Playnite, or reload extensions from developer settings.
@@ -91,8 +91,11 @@ library. If you specifically want to check console/emulated entries, leave the c
 
 ## Building from source
 
-Every push to `main` is built by GitHub Actions and published to the [`latest` release](../../releases/tag/latest) as
-a `.pext` and a `.zip` - most people don't need to build this themselves.
+Every push to `main` is built by GitHub Actions. If that push bumped `extension.yaml`'s `Version`, it's also published
+as a real, permanent [numbered release](../../releases/latest) (`.pext` and `.zip`) - that's what most people should
+download, and what the in-app update check compares against. Every push, bumped or not, also force-moves a
+[`latest` (bleeding edge)](../../releases/tag/latest) prerelease to the same build, for testing something not yet in a
+numbered release. Most people don't need to build any of this themselves.
 
 To build it yourself, you need the .NET SDK (8.0+ works fine even though this targets net462 - it cross-compiles via
 the `Microsoft.NETFramework.ReferenceAssemblies` package, no Windows/.NET Framework install needed):
@@ -112,6 +115,7 @@ Produces `bin/Debug/net462/QueueUpExporter.dll`.
 - Exporting or pushing a library where most games have no genres/developers/publishers ([issue #3](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/3))
   warns that Playnite's "Download Metadata" (Library menu, or right-click a selection) probably hasn't been run yet,
   and lets you cancel or proceed anyway; auto-sync only logs this rather than popping a dialog.
-- The update notification compares `extension.yaml`'s `Version` against the same field baked into the published
-  release's filename. **Any release-worthy change needs a `Version` bump** in `extension.yaml`, or existing installs
-  won't see it as an update.
+- The update notification compares `extension.yaml`'s `Version` against the same field baked into the filename of
+  GitHub's current [latest release](../../releases/latest) - the newest numbered (non-prerelease) release, never the
+  bleeding-edge `latest` alias. **Any release-worthy change needs a `Version` bump** in `extension.yaml`, or it won't
+  get its own numbered release and existing installs won't see it as an update.
