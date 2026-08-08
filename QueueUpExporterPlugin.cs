@@ -88,6 +88,23 @@ namespace QueueUpExporter
             // Backgrounded so a slow/unreachable GitHub API can never delay Playnite's own startup -
             // this is a nice-to-know check, not something worth blocking on.
             Task.Run(() => CheckForUpdate());
+            // Startup safety net (issue #570 follow-up) - covers the case where OnLibraryUpdated
+            // didn't fire on the previous run (extension update, crash) but the library moved on
+            // regardless. TryAutoSync itself is a fast, mostly-synchronous set of guard checks before
+            // it backgrounds the actual push, so this doesn't delay startup either.
+            TryAutoSync();
+        }
+
+        /// <summary>
+        /// Fires after Playnite finishes refreshing library data - its own periodic connected-source
+        /// syncs (Steam/Epic/GOG/...) or a manual "Update library" - which is the real "something
+        /// worth pushing might have changed" signal (issue #570 follow-up: there was no automated
+        /// sync at all before this). TryAutoSync's own cooldown absorbs this firing more often than
+        /// actually useful (e.g. a metadata-only refresh with no new titles).
+        /// </summary>
+        public override void OnLibraryUpdated(OnLibraryUpdatedEventArgs args)
+        {
+            TryAutoSync();
         }
 
         public override IEnumerable<MainMenuItem> GetMainMenuItems(GetMainMenuItemsArgs args)
@@ -111,6 +128,17 @@ namespace QueueUpExporter
                 Description = "Push library to QueueUp",
                 MenuSection = "@QueueUp",
                 Action = PushLibrary,
+            };
+
+            // Reflects current state in its own label (re-evaluated by Playnite each time the menu
+            // opens, same as every other item here) rather than a separate checkbox control - the
+            // SDK's plain MainMenuItem has no built-in checked/toggle state to bind to.
+            var autoSyncEnabled = (LoadPluginSettings<QueueUpConnectionSettings>() ?? new QueueUpConnectionSettings()).AutoSyncEnabled;
+            yield return new MainMenuItem
+            {
+                Description = autoSyncEnabled ? "Disable Auto-Sync" : "Enable Auto-Sync",
+                MenuSection = "@QueueUp",
+                Action = ToggleAutoSync,
             };
         }
 
@@ -197,7 +225,9 @@ namespace QueueUpExporter
         /// <summary>
         /// Builds the deduped/platform-mapped payload and pushes it to QueueUp's bulk import
         /// endpoint (QueueUp#450/#453), then polls for completion. Runs inside a global-progress
-        /// dialog since a big non-Steam library can take a while to resolve server-side.
+        /// dialog since a big non-Steam library can take a while to resolve server-side. The actual
+        /// push/poll work lives in PushLibraryCore below, shared with TryAutoSync's silent
+        /// background variant (#570 follow-up) - this method owns only the dialog/UX around it.
         /// </summary>
         private void PushLibrary(MainMenuItemActionArgs args)
         {
@@ -219,93 +249,192 @@ namespace QueueUpExporter
                 return;
             }
 
-            string resultMessage = null;
-            var isError = false;
+            PushOutcome outcome = null;
 
             PlayniteApi.Dialogs.ActivateGlobalProgress(
-                progressArgs =>
-                {
-                    try
-                    {
-                        using (var client = CreateHttpClient(settings))
-                        {
-                            var requestJson = Serialization.ToJson(new ImportRequestBody { Entries = entries });
-                            var response = client
-                                .PostAsync("api/v1/library/import-playnite", new StringContent(requestJson, Encoding.UTF8, "application/json"))
-                                .GetAwaiter()
-                                .GetResult();
-                            var responseBody = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-
-                            if (!response.IsSuccessStatusCode)
-                            {
-                                resultMessage = DescribeError(response.StatusCode, responseBody);
-                                isError = true;
-                                return;
-                            }
-
-                            var started = Serialization.FromJson<ImportStartedResponse>(responseBody);
-                            progressArgs.IsIndeterminate = true;
-                            progressArgs.Text = $"Sent {entries.Count} titles ({started.ConsideredCount} considered). Waiting for QueueUp to finish matching...";
-
-                            ImportProgress progress = null;
-                            while (true)
-                            {
-                                if (progressArgs.CancelToken.IsCancellationRequested)
-                                {
-                                    resultMessage = "Push canceled locally - QueueUp will keep processing what was already sent; check back in QueueUp later.";
-                                    return;
-                                }
-
-                                Thread.Sleep(1500);
-
-                                var progressResponse = client.GetAsync("api/v1/library/import-playnite/progress").GetAwaiter().GetResult();
-                                var progressBody = progressResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                                if (!progressResponse.IsSuccessStatusCode)
-                                {
-                                    resultMessage = DescribeError(progressResponse.StatusCode, progressBody);
-                                    isError = true;
-                                    return;
-                                }
-
-                                progress = Serialization.FromJson<ImportProgressResponse>(progressBody)?.Progress;
-                                if (progress == null)
-                                {
-                                    continue;
-                                }
-
-                                progressArgs.Text = $"Matched {progress.Matched}, unmatched {progress.Unmatched}, errored {progress.Errored} of {progress.ConsideredCount}...";
-                                if (progress.Done)
-                                {
-                                    break;
-                                }
-                            }
-
-                            resultMessage =
-                                $"Push complete: {progress.Matched} matched, {progress.Unmatched} unresolved (review in QueueUp's Profile Settings), " +
-                                $"{progress.Errored} errored, out of {progress.ConsideredCount} considered.";
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        resultMessage = $"Push failed: {ex.Message}";
-                        isError = true;
-                    }
-                },
+                progressArgs => outcome = PushLibraryCore(settings, entries, text => progressArgs.Text = text, progressArgs.CancelToken),
                 new GlobalProgressOptions("Pushing library to QueueUp...", true) { IsIndeterminate = false });
 
-            if (resultMessage == null)
+            if (outcome == null)
             {
                 return;
             }
 
-            if (isError)
+            // A manual push is itself real, fresh evidence QueueUp is up to date - recording it
+            // here means an auto-sync trigger (OnLibraryUpdated/OnApplicationStarted) firing right
+            // after doesn't immediately re-push the same library over again.
+            if (!outcome.IsError)
             {
-                PlayniteApi.Dialogs.ShowErrorMessage(resultMessage, "Push library to QueueUp");
+                settings.LastAutoSyncAt = DateTime.UtcNow;
+                SavePluginSettings(settings);
+            }
+
+            if (outcome.IsError)
+            {
+                PlayniteApi.Dialogs.ShowErrorMessage(outcome.Message, "Push library to QueueUp");
             }
             else
             {
-                PlayniteApi.Dialogs.ShowMessage(resultMessage, "Push library to QueueUp");
+                PlayniteApi.Dialogs.ShowMessage(outcome.Message, "Push library to QueueUp");
             }
+        }
+
+        /// <summary>
+        /// The push-and-poll request/response cycle itself, with no Dialogs/UI dependency - callable
+        /// from PushLibrary's progress-dialog callback (reportProgress wired to progressArgs.Text)
+        /// and from TryAutoSync's background thread (reportProgress a no-op, cancelToken
+        /// CancellationToken.None - a silent auto-sync isn't user-cancelable). Never throws; any
+        /// failure comes back as an IsError outcome instead.
+        /// </summary>
+        private static PushOutcome PushLibraryCore(
+            QueueUpConnectionSettings settings,
+            List<ImportEntry> entries,
+            Action<string> reportProgress,
+            CancellationToken cancelToken)
+        {
+            try
+            {
+                using (var client = CreateHttpClient(settings))
+                {
+                    var requestJson = Serialization.ToJson(new ImportRequestBody { Entries = entries });
+                    var response = client
+                        .PostAsync("api/v1/library/import-playnite", new StringContent(requestJson, Encoding.UTF8, "application/json"))
+                        .GetAwaiter()
+                        .GetResult();
+                    var responseBody = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        return new PushOutcome { IsError = true, Message = DescribeError(response.StatusCode, responseBody) };
+                    }
+
+                    var started = Serialization.FromJson<ImportStartedResponse>(responseBody);
+                    reportProgress($"Sent {entries.Count} titles ({started.ConsideredCount} considered). Waiting for QueueUp to finish matching...");
+
+                    ImportProgress progress;
+                    while (true)
+                    {
+                        if (cancelToken.IsCancellationRequested)
+                        {
+                            return new PushOutcome
+                            {
+                                IsError = false,
+                                Message = "Push canceled locally - QueueUp will keep processing what was already sent; check back in QueueUp later.",
+                            };
+                        }
+
+                        Thread.Sleep(1500);
+
+                        var progressResponse = client.GetAsync("api/v1/library/import-playnite/progress").GetAwaiter().GetResult();
+                        var progressBody = progressResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                        if (!progressResponse.IsSuccessStatusCode)
+                        {
+                            return new PushOutcome { IsError = true, Message = DescribeError(progressResponse.StatusCode, progressBody) };
+                        }
+
+                        progress = Serialization.FromJson<ImportProgressResponse>(progressBody)?.Progress;
+                        if (progress == null)
+                        {
+                            continue;
+                        }
+
+                        reportProgress($"Matched {progress.Matched}, unmatched {progress.Unmatched}, errored {progress.Errored} of {progress.ConsideredCount}...");
+                        if (progress.Done)
+                        {
+                            break;
+                        }
+                    }
+
+                    return new PushOutcome
+                    {
+                        IsError = false,
+                        Message =
+                            $"Push complete: {progress.Matched} matched, {progress.Unmatched} unresolved (review in QueueUp's Profile Settings), " +
+                            $"{progress.Errored} errored, out of {progress.ConsideredCount} considered.",
+                    };
+                }
+            }
+            catch (Exception ex)
+            {
+                return new PushOutcome { IsError = true, Message = $"Push failed: {ex.Message}" };
+            }
+        }
+
+        private const double AutoSyncCooldownHours = 1.0;
+
+        /// <summary>
+        /// Silent counterpart to the "Push library to QueueUp" menu action (issue #570 follow-up:
+        /// Playnite sync wasn't automated at all before this) - fires from OnLibraryUpdated (a real
+        /// library change) and OnApplicationStarted (a startup safety net in case a change event was
+        /// missed), gated by AutoSyncEnabled and a cooldown so a burst of library-updated events (one
+        /// per connected source syncing, metadata refreshes, ...) can't hammer QueueUp's import
+        /// endpoint. No progress dialog, no error dialog - a background trigger the user didn't click
+        /// shouldn't interrupt them; success gets one small dismissible notification (same style as
+        /// the update-check's), failure only goes to Playnite's own log. Always runs off the calling
+        /// thread's continuation via Task.Run - both call sites are event handlers Playnite expects
+        /// to return promptly.
+        /// </summary>
+        private void TryAutoSync()
+        {
+            var settings = LoadPluginSettings<QueueUpConnectionSettings>();
+            if (settings == null || string.IsNullOrWhiteSpace(settings.Url) || string.IsNullOrWhiteSpace(settings.Key))
+            {
+                return;
+            }
+
+            if (!settings.AutoSyncEnabled)
+            {
+                return;
+            }
+
+            if (settings.LastAutoSyncAt.HasValue && DateTime.UtcNow - settings.LastAutoSyncAt.Value < TimeSpan.FromHours(AutoSyncCooldownHours))
+            {
+                return;
+            }
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    var entries = BuildImportEntries(PlayniteApi.Database.Games);
+                    if (entries.Count == 0)
+                    {
+                        return;
+                    }
+
+                    var outcome = PushLibraryCore(settings, entries, _ => { }, CancellationToken.None);
+                    if (outcome.IsError)
+                    {
+                        LogManager.GetLogger().Warn($"QueueUp auto-sync failed: {outcome.Message}");
+                        return;
+                    }
+
+                    settings.LastAutoSyncAt = DateTime.UtcNow;
+                    SavePluginSettings(settings);
+
+                    PlayniteApi.Notifications.Add(new NotificationMessage(
+                        "queueup_exporter_auto_sync",
+                        $"QueueUp: library synced automatically ({entries.Count} titles).",
+                        NotificationType.Info));
+                }
+                catch (Exception ex)
+                {
+                    LogManager.GetLogger().Warn(ex, "QueueUp auto-sync failed.");
+                }
+            });
+        }
+
+        private void ToggleAutoSync(MainMenuItemActionArgs args)
+        {
+            var settings = LoadPluginSettings<QueueUpConnectionSettings>() ?? new QueueUpConnectionSettings();
+            settings.AutoSyncEnabled = !settings.AutoSyncEnabled;
+            SavePluginSettings(settings);
+
+            PlayniteApi.Dialogs.ShowMessage(
+                settings.AutoSyncEnabled
+                    ? "Auto-Sync enabled - QueueUp will be pushed automatically (at most once an hour) whenever your library changes or Playnite starts."
+                    : "Auto-Sync disabled - use \"Push library to QueueUp\" to sync manually.",
+                "QueueUp Auto-Sync");
         }
 
         private const string UpdateNotificationId = "queueup_exporter_update_available";
@@ -541,6 +670,24 @@ namespace QueueUpExporter
             public string Url { get; set; }
 
             public string Key { get; set; }
+
+            // Defaults true via this initializer, not just "true unless the JSON says otherwise" -
+            // Playnite's settings deserializer only overwrites properties actually present in a
+            // saved settings blob, so an existing connection saved before Auto-Sync existed still
+            // loads as enabled rather than silently defaulting to bool's own false.
+            public bool AutoSyncEnabled { get; set; } = true;
+
+            // Null means "never auto-synced yet" - TryAutoSync treats that as no cooldown to wait
+            // out, so a freshly-connected user's first OnLibraryUpdated/OnApplicationStarted fires
+            // right away instead of waiting a full cooldown window with nothing pushed yet.
+            public DateTime? LastAutoSyncAt { get; set; }
+        }
+
+        private class PushOutcome
+        {
+            public bool IsError { get; set; }
+
+            public string Message { get; set; }
         }
 
         private class ConnectionCode
