@@ -15,11 +15,14 @@ extension hasn't migrated to yet - see [issue #4](https://github.com/trentnbauer
 If you already have the older PowerShell version installed, remove it first (Playnite's `Add-ons` manager, or delete
 `QueueUpExporter.psm1` from its extension folder) - leaving both installed alongside each other is untested.
 
-**Note:** the drag-and-drop `.pext` install hasn't been confirmed working for this specific extension yet. If dragging
-the file onto Playnite's window doesn't trigger an install prompt, use the manual install below instead and check
-`%AppData%\Playnite\extensions.log` for why it didn't load.
+This extension isn't in Playnite's own Add-ons database, so Playnite can't check for updates on its own - instead it
+checks on every startup and shows a Playnite notification if a newer release is available, linking to the download
+page. It can't install the update for you; drag the new `.pext` in the same way as above.
 
 ### Manual install
+
+Only needed if drag-and-drop doesn't trigger an install prompt for some reason - check
+`%AppData%\Playnite\extensions.log` first if that happens.
 
 1. Download `QueueUpExporter.zip` from the [latest release](../../releases/tag/latest) and unzip it - this gives you a
    folder containing `extension.yaml` and `QueueUpExporter.dll`, no build step needed.
@@ -90,3 +93,6 @@ Produces `bin/Debug/net462/QueueUpExporter.dll`.
 - Pushing to QueueUp is a manual menu action, not an automatic background sync.
 - [Issue #3](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/3) - no warning yet when exporting a
   library that hasn't had metadata downloaded.
+- The update notification compares `extension.yaml`'s `Version` against the same field baked into the published
+  release's filename. **Any release-worthy change needs a `Version` bump** in `extension.yaml`, or existing installs
+  won't see it as an update.

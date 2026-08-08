@@ -24,6 +24,9 @@
          MessageBoxImage/MessageBoxResult, so the compiler needs this resolvable even for the plain
          single-string overload actually called here. -->
     <Reference Include="PresentationFramework" />
+    <!-- System.Windows.Application.Current.Dispatcher - marshals the update-check notification
+         back to the UI thread from the background thread it's computed on. -->
+    <Reference Include="WindowsBase" />
     <!-- Not implied by default for a net462 SDK-style project - needed for HttpClient (push to
          QueueUp, #7). -->
     <Reference Include="System.Net.Http" />

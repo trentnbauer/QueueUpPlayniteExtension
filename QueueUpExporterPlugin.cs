@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -8,8 +9,10 @@ using System.Net.Http.Headers;
 using System.Reflection;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Playnite.SDK;
 using Playnite.SDK.Data;
+using Playnite.SDK.Events;
 using Playnite.SDK.Models;
 using Playnite.SDK.Plugins;
 
@@ -70,6 +73,21 @@ namespace QueueUpExporter
 
         public QueueUpExporterPlugin(IPlayniteAPI api) : base(api)
         {
+        }
+
+        /// <summary>
+        /// This extension isn't in Playnite's own Add-ons database (it's distributed manually via
+        /// GitHub releases - see README), so Playnite has no way to know a new version exists on its
+        /// own. Checks GitHub on every startup instead and surfaces a notification if the published
+        /// release is ahead of what's installed - the user still has to grab and drag in the new
+        /// `.pext` themselves, since there's no API for a plugin to replace its own files while
+        /// Playnite has it loaded.
+        /// </summary>
+        public override void OnApplicationStarted(OnApplicationStartedEventArgs args)
+        {
+            // Backgrounded so a slow/unreachable GitHub API can never delay Playnite's own startup -
+            // this is a nice-to-know check, not something worth blocking on.
+            Task.Run(() => CheckForUpdate());
         }
 
         public override IEnumerable<MainMenuItem> GetMainMenuItems(GetMainMenuItemsArgs args)
@@ -290,6 +308,145 @@ namespace QueueUpExporter
             }
         }
 
+        private const string UpdateNotificationId = "queueup_exporter_update_available";
+        private const string ReleaseTagApiUrl = "https://api.github.com/repos/trentnbauer/QueueUpPlayniteExtension/releases/tags/latest";
+        private const string ReleasePageUrl = "https://github.com/trentnbauer/QueueUpPlayniteExtension/releases/tag/latest";
+
+        private void CheckForUpdate()
+        {
+            try
+            {
+                var localVersion = ReadLocalVersion();
+                var remoteVersion = localVersion == null ? null : FetchLatestReleaseVersion();
+                if (remoteVersion == null || remoteVersion <= localVersion)
+                {
+                    return;
+                }
+
+                var notification = new NotificationMessage(
+                    UpdateNotificationId,
+                    $"A new QueueUp Library Exporter version is available ({remoteVersion}, you have {localVersion}). Click to open the download page.",
+                    NotificationType.Info,
+                    OpenReleasePage);
+
+                // This runs on the Task.Run background thread OnApplicationStarted kicked off, but
+                // INotificationsAPI.Messages is an ObservableCollection WPF's UI binds to directly -
+                // mutating it off the dispatcher thread throws. Application.Current is null under a
+                // non-UI host (never true inside real Playnite, but cheap to guard).
+                Action addNotification = () =>
+                {
+                    // Remove any notification left over from an earlier startup before adding a
+                    // fresh one - Add doesn't dedupe by Id itself, and without this a version bump
+                    // the user hasn't acted on yet would pile up a duplicate on every launch.
+                    PlayniteApi.Notifications.Remove(UpdateNotificationId);
+                    PlayniteApi.Notifications.Add(notification);
+                };
+
+                var dispatcher = System.Windows.Application.Current?.Dispatcher;
+                if (dispatcher == null || dispatcher.CheckAccess())
+                {
+                    addNotification();
+                }
+                else
+                {
+                    dispatcher.Invoke(addNotification);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Never surface an error dialog over a background version check - the user didn't
+                // ask for this, so a failure (offline, GitHub down, rate-limited) should just be
+                // silent, same "quiet failure" reasoning as the export's own per-property try/catch.
+                LogManager.GetLogger().Warn(ex, "QueueUp update check failed.");
+            }
+        }
+
+        /// <summary>
+        /// The update notification's click action - runs later, on Playnite's UI thread when the
+        /// user actually clicks it, well outside CheckForUpdate's own try/catch. Process.Start on a
+        /// bare URL throws Win32Exception if there's no registered browser/URL handler; same "don't
+        /// surface an error dialog over something the user didn't explicitly ask to run" reasoning
+        /// as CheckForUpdate itself.
+        /// </summary>
+        private static void OpenReleasePage()
+        {
+            try
+            {
+                Process.Start(ReleasePageUrl);
+            }
+            catch (Exception ex)
+            {
+                LogManager.GetLogger().Warn(ex, "Could not open the QueueUp Library Exporter release page.");
+            }
+        }
+
+        /// <summary>
+        /// Reads Version straight from this install's own extension.yaml, sitting next to the
+        /// compiled DLL - single source of truth rather than a second hardcoded copy, same file
+        /// CI's build reads to name the release asset (see .github/workflows/build.yml).
+        ///
+        /// This is also what CheckForUpdate compares against the published release, which is named
+        /// from that same field - a PR that ships a user-visible change without bumping
+        /// extension.yaml's Version republishes the exact same asset name, so every existing install
+        /// computes "no update available" and the notification never fires. Bump Version on any
+        /// release-worthy change.
+        /// </summary>
+        private static Version ReadLocalVersion()
+        {
+            var pluginDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+            var manifestPath = Path.Combine(pluginDirectory ?? string.Empty, "extension.yaml");
+            if (!File.Exists(manifestPath))
+            {
+                return null;
+            }
+
+            foreach (var line in File.ReadAllLines(manifestPath))
+            {
+                if (line.StartsWith("Version:", StringComparison.OrdinalIgnoreCase))
+                {
+                    var value = line.Substring("Version:".Length).Trim();
+                    return Version.TryParse(value, out var version) ? version : null;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// GitHub's own "latest release" API endpoint excludes prereleases, and this repo's only
+        /// release (tag "latest", rebuilt on every push to main) is marked prerelease - fetches it
+        /// by tag instead. Neither the release name nor the tag carries a version of its own (both
+        /// are static "Latest build"/"latest"); the only place a version shows up is the `.pext`
+        /// asset's filename, named from extension.yaml's Version field by the same build.
+        /// </summary>
+        private static Version FetchLatestReleaseVersion()
+        {
+            using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) })
+            {
+                // GitHub's API rejects requests with no User-Agent header. TryAddWithoutValidation
+                // rather than Add - Add parses/validates the value into a typed header and throws
+                // FormatException on anything it doesn't like; neither header here needs that.
+                client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "QueueUpExporter-Playnite-Plugin");
+                client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/vnd.github+json");
+
+                var json = client.GetStringAsync(ReleaseTagApiUrl).GetAwaiter().GetResult();
+                var release = Serialization.FromJson<GitHubRelease>(json);
+                var pextAsset = release?.Assets?.FirstOrDefault(a =>
+                    a.Name != null &&
+                    a.Name.StartsWith("QueueUpExporter_v", StringComparison.OrdinalIgnoreCase) &&
+                    a.Name.EndsWith(".pext", StringComparison.OrdinalIgnoreCase));
+                if (pextAsset == null)
+                {
+                    return null;
+                }
+
+                var versionText = pextAsset.Name.Substring(
+                    "QueueUpExporter_v".Length,
+                    pextAsset.Name.Length - "QueueUpExporter_v".Length - ".pext".Length);
+                return Version.TryParse(versionText, out var version) ? version : null;
+            }
+        }
+
         private static HttpClient CreateHttpClient(QueueUpConnectionSettings settings)
         {
             var client = new HttpClient { BaseAddress = new Uri(settings.Url.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(30) };
@@ -444,6 +601,18 @@ namespace QueueUpExporter
         {
             [SerializationPropertyName("error")]
             public string Error { get; set; }
+        }
+
+        private class GitHubRelease
+        {
+            [SerializationPropertyName("assets")]
+            public List<GitHubReleaseAsset> Assets { get; set; }
+        }
+
+        private class GitHubReleaseAsset
+        {
+            [SerializationPropertyName("name")]
+            public string Name { get; set; }
         }
 
         /// <summary>
