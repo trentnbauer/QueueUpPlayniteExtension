@@ -7,6 +7,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -262,10 +263,14 @@ namespace QueueUpExporter
 
             // A manual push is itself real, fresh evidence QueueUp is up to date - recording it
             // here means an auto-sync trigger (OnLibraryUpdated/OnApplicationStarted) firing right
-            // after doesn't immediately re-push the same library over again.
+            // after doesn't immediately re-push the same library over again. LastPushedHash is
+            // recorded too (issue #18) so that same follow-up trigger's unchanged-library check
+            // also has something current to compare against, rather than only the cooldown
+            // protecting against a redundant re-push.
             if (!outcome.IsError)
             {
                 settings.LastAutoSyncAt = DateTime.UtcNow;
+                settings.LastPushedHash = ComputeEntriesHash(entries);
                 SavePluginSettings(settings);
             }
 
@@ -366,13 +371,13 @@ namespace QueueUpExporter
         /// Silent counterpart to the "Push library to QueueUp" menu action (issue #570 follow-up:
         /// Playnite sync wasn't automated at all before this) - fires from OnLibraryUpdated (a real
         /// library change) and OnApplicationStarted (a startup safety net in case a change event was
-        /// missed), gated by AutoSyncEnabled and a cooldown so a burst of library-updated events (one
-        /// per connected source syncing, metadata refreshes, ...) can't hammer QueueUp's import
-        /// endpoint. No progress dialog, no error dialog - a background trigger the user didn't click
-        /// shouldn't interrupt them; success gets one small dismissible notification (same style as
-        /// the update-check's), failure only goes to Playnite's own log. Always runs off the calling
-        /// thread's continuation via Task.Run - both call sites are event handlers Playnite expects
-        /// to return promptly.
+        /// missed), gated by AutoSyncEnabled, an unchanged-library check (issue #18), and a cooldown
+        /// so a burst of library-updated events (one per connected source syncing, metadata
+        /// refreshes, ...) can't hammer QueueUp's import endpoint. No progress dialog, no error
+        /// dialog - a background trigger the user didn't click shouldn't interrupt them; success
+        /// gets one small dismissible notification (same style as the update-check's), failure only
+        /// goes to Playnite's own log. Always runs off the calling thread's continuation via
+        /// Task.Run - both call sites are event handlers Playnite expects to return promptly.
         /// </summary>
         private void TryAutoSync()
         {
@@ -387,6 +392,25 @@ namespace QueueUpExporter
                 return;
             }
 
+            // Building entries and hashing them is local/synchronous, no network round-trip -
+            // cheap enough to do up front, before the cooldown check, so a library that's
+            // byte-for-byte identical to what was last successfully pushed (metadata-only refresh,
+            // cover-art re-scan, a restart with nothing changed) skips entirely regardless of
+            // cooldown state (issue #18) instead of spending a full push + server-side matching
+            // pass on nothing new.
+            var entries = BuildImportEntries(PlayniteApi.Database.Games);
+            if (entries.Count == 0)
+            {
+                return;
+            }
+
+            var currentHash = ComputeEntriesHash(entries);
+            if (currentHash == settings.LastPushedHash)
+            {
+                LogManager.GetLogger().Debug("QueueUp auto-sync skipped: library unchanged since last push.");
+                return;
+            }
+
             if (settings.LastAutoSyncAt.HasValue && DateTime.UtcNow - settings.LastAutoSyncAt.Value < TimeSpan.FromHours(AutoSyncCooldownHours))
             {
                 return;
@@ -396,12 +420,6 @@ namespace QueueUpExporter
             {
                 try
                 {
-                    var entries = BuildImportEntries(PlayniteApi.Database.Games);
-                    if (entries.Count == 0)
-                    {
-                        return;
-                    }
-
                     var outcome = PushLibraryCore(settings, entries, _ => { }, CancellationToken.None);
                     if (outcome.IsError)
                     {
@@ -410,6 +428,7 @@ namespace QueueUpExporter
                     }
 
                     settings.LastAutoSyncAt = DateTime.UtcNow;
+                    settings.LastPushedHash = currentHash;
                     SavePluginSettings(settings);
 
                     PlayniteApi.Notifications.Add(new NotificationMessage(
@@ -665,6 +684,27 @@ namespace QueueUpExporter
                 .ToList();
         }
 
+        /// <summary>
+        /// Deterministic fingerprint of a built entries list, for TryAutoSync's unchanged-library
+        /// skip (issue #18). Sorts titles and, within each entry, platforms before hashing rather
+        /// than trusting BuildImportEntries' own Dictionary/HashSet enumeration order - that order
+        /// is incidental (insertion-order-ish in practice, not a documented guarantee), so two
+        /// builds over identical underlying library data could otherwise hash differently and defeat
+        /// the whole point of comparing hashes across runs.
+        /// </summary>
+        private static string ComputeEntriesHash(List<ImportEntry> entries)
+        {
+            var canonical = string.Join("\n", entries
+                .OrderBy(e => e.Title, StringComparer.Ordinal)
+                .Select(e => e.Title + "|" + string.Join(",", e.Platforms.OrderBy(p => p, StringComparer.Ordinal))));
+
+            using (var sha256 = SHA256.Create())
+            {
+                var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(canonical));
+                return Convert.ToBase64String(hashBytes);
+            }
+        }
+
         private class QueueUpConnectionSettings
         {
             public string Url { get; set; }
@@ -681,6 +721,13 @@ namespace QueueUpExporter
             // out, so a freshly-connected user's first OnLibraryUpdated/OnApplicationStarted fires
             // right away instead of waiting a full cooldown window with nothing pushed yet.
             public DateTime? LastAutoSyncAt { get; set; }
+
+            // Hash of the entries built from the library as of the last successful push (manual or
+            // auto), from ComputeEntriesHash - issue #18. Null means "nothing pushed yet" (or a
+            // settings blob saved before this field existed), which never equals a real hash, so
+            // TryAutoSync's unchanged-library check simply falls through to the cooldown/push path
+            // the first time, same "no prior state to compare against" reasoning as LastAutoSyncAt.
+            public string LastPushedHash { get; set; }
         }
 
         private class PushOutcome
