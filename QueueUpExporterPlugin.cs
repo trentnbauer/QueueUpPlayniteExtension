@@ -163,7 +163,20 @@ namespace QueueUpExporter
                 games = games.Take(limit);
             }
 
-            var export = games.Select(ToExportDictionary).ToList();
+            var gameList = games.ToList();
+            if (LooksLikeMetadataMissing(gameList))
+            {
+                var proceed = PlayniteApi.Dialogs.ShowMessage(
+                    MissingMetadataMessage,
+                    "QueueUp Export",
+                    System.Windows.MessageBoxButton.YesNo);
+                if (proceed != System.Windows.MessageBoxResult.Yes)
+                {
+                    return;
+                }
+            }
+
+            var export = gameList.Select(ToExportDictionary).ToList();
             var json = Serialization.ToJson(export, true);
 
             var savePath = PlayniteApi.Dialogs.SaveFile("JSON file|*.json");
@@ -241,13 +254,26 @@ namespace QueueUpExporter
                 return;
             }
 
-            var entries = BuildImportEntries(PlayniteApi.Database.Games);
+            var games = PlayniteApi.Database.Games;
+            var entries = BuildImportEntries(games);
             if (entries.Count == 0)
             {
                 PlayniteApi.Dialogs.ShowMessage(
                     "No games with a recognized platform (PC/Xbox/PlayStation/Switch) found to push.",
                     "Push library to QueueUp");
                 return;
+            }
+
+            if (LooksLikeMetadataMissing(games))
+            {
+                var proceed = PlayniteApi.Dialogs.ShowMessage(
+                    MissingMetadataMessage,
+                    "Push library to QueueUp",
+                    System.Windows.MessageBoxButton.YesNo);
+                if (proceed != System.Windows.MessageBoxResult.Yes)
+                {
+                    return;
+                }
             }
 
             PushOutcome outcome = null;
@@ -398,7 +424,8 @@ namespace QueueUpExporter
             // cover-art re-scan, a restart with nothing changed) skips entirely regardless of
             // cooldown state (issue #18) instead of spending a full push + server-side matching
             // pass on nothing new.
-            var entries = BuildImportEntries(PlayniteApi.Database.Games);
+            var games = PlayniteApi.Database.Games;
+            var entries = BuildImportEntries(games);
             if (entries.Count == 0)
             {
                 return;
@@ -414,6 +441,19 @@ namespace QueueUpExporter
             if (settings.LastAutoSyncAt.HasValue && DateTime.UtcNow - settings.LastAutoSyncAt.Value < TimeSpan.FromHours(AutoSyncCooldownHours))
             {
                 return;
+            }
+
+            // Auto-sync is a background trigger the user didn't click, so - same "no dialog"
+            // reasoning as the rest of this method - a missing-metadata warning (issue #3) can only
+            // be logged here, not asked as a blocking Yes/No like PushLibrary does. Doesn't skip the
+            // push itself: sparse metadata doesn't make the sync wrong, just less useful, and
+            // skipping would silently stop auto-syncing altogether until the user happens to notice
+            // and run Download Metadata on their own.
+            if (LooksLikeMetadataMissing(games))
+            {
+                LogManager.GetLogger().Warn(
+                    "QueueUp auto-sync: most games have no genres/developers/publishers - " +
+                    "Playnite's Download Metadata may not have been run for this library yet.");
             }
 
             Task.Run(() =>
@@ -640,6 +680,45 @@ namespace QueueUpExporter
 
             return null;
         }
+
+        // Above this proportion of games in the export having no genres, developers, or publishers
+        // at all is treated as "Download Metadata was never run" rather than "this library just
+        // happens to be sparse" (issue #3) - picked from the real-world case that motivated this
+        // check (241 games, no metadata download run first: genres empty for 240/241, developers/
+        // publishers empty for ~90%), which sits nowhere near this threshold by accident.
+        private const double MissingMetadataThreshold = 0.5;
+
+        /// <summary>
+        /// Playnite's SDK has no way to trigger "Download Metadata" itself (confirmed by the
+        /// maintainer - issue #3) - it stays a manual step the user runs from Playnite's Library
+        /// menu (or right-click a selection) before exporting. A game missing genres, developers,
+        /// AND publishers all at once is a strong signal metadata was never downloaded for it,
+        /// rather than the title genuinely having none of the three (checking all three together,
+        /// not any one alone, keeps a game that's merely light on one field from tripping this).
+        /// Flags the whole batch once more than MissingMetadataThreshold of the games being
+        /// exported look that way.
+        /// </summary>
+        private static bool LooksLikeMetadataMissing(ICollection<Game> games)
+        {
+            if (games.Count == 0)
+            {
+                return false;
+            }
+
+            var missingCount = games.Count(g =>
+                (g.Genres == null || g.Genres.Count == 0) &&
+                (g.Developers == null || g.Developers.Count == 0) &&
+                (g.Publishers == null || g.Publishers.Count == 0));
+
+            return (double)missingCount / games.Count > MissingMetadataThreshold;
+        }
+
+        private const string MissingMetadataMessage =
+            "Most of these games have no genres, developers, or publishers - looks like Playnite's " +
+            "\"Download Metadata\" hasn't been run for this library yet (right-click a selection, or " +
+            "the Library menu, in Playnite itself). Exporting now will produce a misleadingly sparse " +
+            "result.\n\nExport anyway? Choose \"No\" to cancel, run Download Metadata in Playnite, " +
+            "then come back and try again.";
 
         /// <summary>
         /// Dedupes/unions by title (QueueUp's own dedupeImportEntries is only a defensive backstop -
