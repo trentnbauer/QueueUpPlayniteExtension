@@ -52,13 +52,30 @@ key. Run this once per Playnite install, or again if you regenerate the code in 
 - Shows a progress dialog while QueueUp matches titles to games (via IGDB, on QueueUp's server), then reports how many
   matched, how many need manual review in QueueUp, and how many errored.
 
-This is a manual action, not an automatic sync - re-run it whenever you want to push library changes. Confirmed
-working end-to-end against a real 1445-game library.
+Once you've run this manually at least once, Auto-Sync (below) takes over pushing future changes on its own - re-run
+it by hand any time you want an immediate push instead of waiting for the next automatic trigger. Confirmed working
+end-to-end against a real 1445-game library.
 
 **If something goes wrong:** an error dialog quotes QueueUp's response directly - check it for a wrong server URL, an
 expired/revoked connection code, or a network/HTTPS problem. If the push succeeds but the unmatched count looks a lot
 higher than expected, that points to QueueUp's title-matching (or the platform mapping above) rather than anything
 having crashed.
+
+### 3. Auto-Sync
+
+Once connected, the extension pushes your library to QueueUp on its own - no more manually re-running `Push library
+to QueueUp` every time something changes:
+
+- **Triggers:** whenever Playnite finishes refreshing library data (its own periodic Steam/Epic/GOG/etc. syncs, or a
+  manual "Update library"), and once at Playnite startup as a safety net in case a change was missed on the previous
+  run.
+- **Cooldown:** at most once an hour, so a burst of library-updated events (each connected source syncing
+  separately, a metadata-only refresh, ...) doesn't hammer QueueUp with repeat pushes.
+- **Silent:** no progress dialog and no error dialog - a background trigger you didn't click shouldn't interrupt you.
+  A successful auto-sync shows one small dismissible notification; a failed one only goes to Playnite's own log
+  (`Add-ons` → view logs), so a transient network hiccup doesn't nag you.
+- **`Enable Auto-Sync` / `Disable Auto-Sync`** in the `@QueueUp` menu toggles it - on by default once you've
+  connected. With it off, pushing is back to a fully manual action via `Push library to QueueUp`.
 
 ### Exporting to a JSON file (diagnostic)
 
@@ -90,7 +107,8 @@ Produces `bin/Debug/net462/QueueUpExporter.dll`.
 
 - It's a C# `GenericPlugin` targeting the Playnite 10 SDK (PlayniteSDK 6.15.0, .NET Framework 4.6.2) - see
   [issue #4](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/4) for why Playnite 11 isn't supported yet.
-- Pushing to QueueUp is a manual menu action, not an automatic background sync.
+- Pushing to QueueUp auto-syncs on library changes/startup (at most once an hour), or run `Push library to QueueUp`
+  by hand any time; `Enable Auto-Sync`/`Disable Auto-Sync` toggles the automatic side.
 - [Issue #3](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/3) - no warning yet when exporting a
   library that hasn't had metadata downloaded.
 - The update notification compares `extension.yaml`'s `Version` against the same field baked into the published
