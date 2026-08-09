@@ -722,14 +722,37 @@ namespace QueueUpExporter
             "result.\n\nExport anyway? Choose \"No\" to cancel, run Download Metadata in Playnite, " +
             "then come back and try again.";
 
+        // Playnite's built-in name for its "finished this" completion status (issue #577's
+        // IsCompleted) - CompletionStatus is a user-renameable database row, not an enum, but this
+        // is the name Playnite ships it under by default and what QueueUp's own isCompleted doc
+        // comment (LibraryImportEntry.isCompleted) already commits to matching.
+        private const string CompletedStatusName = "Completed";
+
+        private class TitleAccumulator
+        {
+            public HashSet<string> Platforms { get; } = new HashSet<string>();
+
+            // Max, not sum, across every Game row that collapses into this title - same reasoning as
+            // the server's own defensive dedupeImportEntries (routes/apiV1.ts): two Playnite entries
+            // for the same title (e.g. a Steam copy and a GOG copy of the same game) aren't two
+            // separate playthroughs to add together, just two records of relative playtime for one.
+            public ulong PlaytimeSeconds { get; set; }
+
+            public bool IsCompleted { get; set; }
+        }
+
         /// <summary>
         /// Dedupes/unions by title (QueueUp's own dedupeImportEntries is only a defensive backstop -
         /// see its doc comment referencing this issue), and drops any title that maps to zero
         /// recognized platforms rather than sending an ownership claim with nothing behind it.
+        /// Also carries each title's playtime (issue #577) and Completed status through - Game.Playtime
+        /// is always present (0 for never-played, not null), so both PlaytimeMinutes and IsCompleted
+        /// are always sent rather than only when "interesting": QueueUp treats 0/false the same as
+        /// omitted, and always sending keeps this function from having to guess which case it's in.
         /// </summary>
         private static List<ImportEntry> BuildImportEntries(IEnumerable<Game> games)
         {
-            var byTitle = new Dictionary<string, HashSet<string>>();
+            var byTitle = new Dictionary<string, TitleAccumulator>();
             foreach (var game in games)
             {
                 if (string.IsNullOrWhiteSpace(game.Name))
@@ -738,10 +761,20 @@ namespace QueueUpExporter
                 }
 
                 var title = game.Name.Trim();
-                if (!byTitle.TryGetValue(title, out var platforms))
+                if (!byTitle.TryGetValue(title, out var accumulator))
                 {
-                    platforms = new HashSet<string>();
-                    byTitle[title] = platforms;
+                    accumulator = new TitleAccumulator();
+                    byTitle[title] = accumulator;
+                }
+
+                if (game.Playtime > accumulator.PlaytimeSeconds)
+                {
+                    accumulator.PlaytimeSeconds = game.Playtime;
+                }
+
+                if (game.CompletionStatus != null && game.CompletionStatus.Name == CompletedStatusName)
+                {
+                    accumulator.IsCompleted = true;
                 }
 
                 if (game.Platforms == null)
@@ -754,14 +787,20 @@ namespace QueueUpExporter
                     var mapped = MapPlatformName(platform?.Name);
                     if (mapped != null)
                     {
-                        platforms.Add(mapped);
+                        accumulator.Platforms.Add(mapped);
                     }
                 }
             }
 
             return byTitle
-                .Where(kv => kv.Value.Count > 0)
-                .Select(kv => new ImportEntry { Title = kv.Key, Platforms = kv.Value.ToList() })
+                .Where(kv => kv.Value.Platforms.Count > 0)
+                .Select(kv => new ImportEntry
+                {
+                    Title = kv.Key,
+                    Platforms = kv.Value.Platforms.ToList(),
+                    PlaytimeMinutes = (long)(kv.Value.PlaytimeSeconds / 60),
+                    IsCompleted = kv.Value.IsCompleted,
+                })
                 .ToList();
         }
 
@@ -834,6 +873,14 @@ namespace QueueUpExporter
 
             [SerializationPropertyName("platforms")]
             public List<string> Platforms { get; set; }
+
+            // All-time playtime in minutes (issue #577) - QueueUp's LibraryImportEntry.playtimeMinutes.
+            [SerializationPropertyName("playtimeMinutes")]
+            public long PlaytimeMinutes { get; set; }
+
+            // QueueUp's LibraryImportEntry.isCompleted - see CompletedStatusName above.
+            [SerializationPropertyName("isCompleted")]
+            public bool IsCompleted { get; set; }
         }
 
         private class ImportRequestBody
