@@ -47,6 +47,9 @@ jobs:
           zip -j "$PEXT_NAME" extension.yaml bin/Release/net462/QueueUpExporter.dll
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "PEXT_NAME=$PEXT_NAME" >> "$GITHUB_ENV"
+          # Same file under a version-free name, so .../releases/latest/download/QueueUpExporter.pext
+          # stays a valid direct link across releases (the versioned name changes every release).
+          cp "$PEXT_NAME" QueueUpExporter.pext
 
       - uses: actions/upload-artifact@v4
         with:
@@ -70,7 +73,7 @@ jobs:
           gh release delete latest --yes || true
           git tag -f latest
           git push origin latest --force
-          gh release create latest QueueUpExporter.zip "$PEXT_NAME" \
+          gh release create latest QueueUpExporter.zip "$PEXT_NAME" QueueUpExporter.pext \
             --title "Latest build (bleeding edge)" \
             --notes "Unreleased build auto-published from every push to main - may be ahead of, or less tested than, the current stable release. Built from $(git rev-parse --short HEAD). Most people want the stable release instead: https://github.com/trentnbauer/QueueUpPlayniteExtension/releases/latest" \
             --prerelease
@@ -91,7 +94,7 @@ jobs:
             echo "Release $TAG already exists (extension.yaml Version wasn't bumped in this push) - skipping."
             exit 0
           fi
-          gh release create "$TAG" QueueUpExporter.zip "$PEXT_NAME" \
+          gh release create "$TAG" QueueUpExporter.zip "$PEXT_NAME" QueueUpExporter.pext \
             --title "$TAG" \
             --notes "Built from $(git rev-parse --short HEAD). Easiest install: download the .pext file and drag it onto Playnite's open window - it installs itself. Alternative: unzip QueueUpExporter.zip and drop the folder into %AppData%\\Playnite\\Extensions\\, or point Playnite's developer-extension setting at the unzipped folder."
         env:
