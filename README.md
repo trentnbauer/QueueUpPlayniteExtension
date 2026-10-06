@@ -82,8 +82,8 @@ to QueueUp` every time something changes:
 After a successful push, the extension also tells QueueUp what this PC is, so QueueUp's **My computer** section
 (Profile & settings) can be prefilled:
 
-- **What is sent:** the processor name, graphics card name, installed memory (in GB) and Windows version, read through
-  Windows' own WMI. Nothing else about the machine, and nothing about your games beyond the push itself.
+- **What is sent:** the processor name, graphics card name, installed memory (in GB) and the resolution and refresh rate of
+  your main (primary) monitor, like `2560x1440 @ 144Hz`, read through Windows itself. Other monitors are not looked at. Nothing else about the machine, and nothing about your games beyond the push itself.
 - **Only blanks are filled.** QueueUp never replaces something you typed under My computer, so you can correct a
   value and it stays corrected. Graphics cards that are virtual or basic display adapters (remote desktop, game
   streaming) are ignored, and the one with the most memory is picked when there are several.

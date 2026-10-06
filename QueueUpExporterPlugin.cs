@@ -402,7 +402,7 @@ namespace QueueUpExporter
         }
 
         /// <summary>
-        /// Tells QueueUp what this PC is (processor, graphics card, memory, Windows version) so its
+        /// Tells QueueUp what this PC is (processor, graphics card, memory, main monitor resolution) so its
         /// "My computer" section can be prefilled. QueueUp only fills fields the person left blank,
         /// so what they typed there is never changed. Runs after a successful push, off the UI thread,
         /// only when the specs have changed since the last time they were sent, and never reports an
@@ -455,7 +455,7 @@ namespace QueueUpExporter
         }
 
         /// <summary>
-        /// Reads the processor, graphics card, installed memory and Windows version through WMI.
+        /// Reads the processor, graphics card and installed memory through WMI, and the main monitor's resolution.
         /// Each is read on its own, so one that cannot be read is just left out. Null when nothing
         /// could be read at all (Playnite on a system without WMI).
         /// </summary>
@@ -513,10 +513,77 @@ namespace QueueUpExporter
                 // left out
             }
 
-            var os = Tidy(WmiFirst("SELECT Caption FROM Win32_OperatingSystem", "Caption"));
-            specs.Os = os == null ? null : (os.StartsWith("Microsoft ", StringComparison.OrdinalIgnoreCase) ? os.Substring("Microsoft ".Length) : os);
+            specs.Display = ReadMainMonitor();
 
-            return specs.Cpu == null && specs.Gpu == null && specs.RamGb == null && specs.Os == null ? null : specs;
+            return specs.Cpu == null && specs.Gpu == null && specs.RamGb == null && specs.Display == null ? null : specs;
+        }
+
+        /// <summary>
+        /// The main (primary) monitor's current resolution and refresh rate, like "2560x1440 @ 144Hz".
+        /// Read from the display driver's current mode rather than from WPF, which reports scaled
+        /// units on a high-DPI screen. Only the primary monitor is looked at. Null when it cannot be read.
+        /// </summary>
+        private static string ReadMainMonitor()
+        {
+            try
+            {
+                var mode = new DevMode { dmSize = (short)System.Runtime.InteropServices.Marshal.SizeOf(typeof(DevMode)) };
+                if (!EnumDisplaySettings(null, EnumCurrentSettings, ref mode) || mode.dmPelsWidth <= 0 || mode.dmPelsHeight <= 0)
+                {
+                    return null;
+                }
+
+                var text = $"{mode.dmPelsWidth}x{mode.dmPelsHeight}";
+                // 0 and 1 mean "the hardware default", not a real rate.
+                return mode.dmDisplayFrequency > 1 ? $"{text} @ {mode.dmDisplayFrequency}Hz" : text;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private const int EnumCurrentSettings = -1;
+
+        // A null device name asks for the primary display.
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Ansi)]
+        private static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DevMode devMode);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Ansi)]
+        private struct DevMode
+        {
+            [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string dmDeviceName;
+            public short dmSpecVersion;
+            public short dmDriverVersion;
+            public short dmSize;
+            public short dmDriverExtra;
+            public int dmFields;
+            public int dmPositionX;
+            public int dmPositionY;
+            public int dmDisplayOrientation;
+            public int dmDisplayFixedOutput;
+            public short dmColor;
+            public short dmDuplex;
+            public short dmYResolution;
+            public short dmTTOption;
+            public short dmCollate;
+            [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string dmFormName;
+            public short dmLogPixels;
+            public int dmBitsPerPel;
+            public int dmPelsWidth;
+            public int dmPelsHeight;
+            public int dmDisplayFlags;
+            public int dmDisplayFrequency;
+            public int dmICMMethod;
+            public int dmICMIntent;
+            public int dmMediaType;
+            public int dmDitherType;
+            public int dmReserved1;
+            public int dmReserved2;
+            public int dmPanningWidth;
+            public int dmPanningHeight;
         }
 
         private static readonly string[] VirtualAdapterWords =
@@ -584,7 +651,7 @@ namespace QueueUpExporter
 
             PlayniteApi.Dialogs.ShowMessage(
                 settings.SendSpecsEnabled
-                    ? "QueueUp will fill in your PC specs (processor, graphics card, memory, Windows version) under My computer after your next push, only where you have left them blank."
+                    ? "QueueUp will fill in your PC specs (processor, graphics card, memory, main monitor resolution) under My computer after your next push, only where you have left them blank."
                     : "PC specs will no longer be sent to QueueUp. What is already in My computer stays until you change it there.",
                 "QueueUp PC specs");
         }
@@ -1067,8 +1134,8 @@ namespace QueueUpExporter
             [SerializationPropertyName("ramGb")]
             public int? RamGb { get; set; }
 
-            [SerializationPropertyName("os")]
-            public string Os { get; set; }
+            [SerializationPropertyName("display")]
+            public string Display { get; set; }
         }
 
         private class PushOutcome
