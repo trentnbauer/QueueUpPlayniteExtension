@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Management;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -134,12 +135,20 @@ namespace QueueUpExporter
             // Reflects current state in its own label (re-evaluated by Playnite each time the menu
             // opens, same as every other item here) rather than a separate checkbox control - the
             // SDK's plain MainMenuItem has no built-in checked/toggle state to bind to.
-            var autoSyncEnabled = (LoadPluginSettings<QueueUpConnectionSettings>() ?? new QueueUpConnectionSettings()).AutoSyncEnabled;
+            var connectionSettings = LoadPluginSettings<QueueUpConnectionSettings>() ?? new QueueUpConnectionSettings();
+            var autoSyncEnabled = connectionSettings.AutoSyncEnabled;
             yield return new MainMenuItem
             {
                 Description = autoSyncEnabled ? "Disable Auto-Sync" : "Enable Auto-Sync",
                 MenuSection = "@QueueUp",
                 Action = ToggleAutoSync,
+            };
+
+            yield return new MainMenuItem
+            {
+                Description = connectionSettings.SendSpecsEnabled ? "Stop sending PC specs to QueueUp" : "Send PC specs to QueueUp",
+                MenuSection = "@QueueUp",
+                Action = ToggleSendSpecs,
             };
         }
 
@@ -298,6 +307,7 @@ namespace QueueUpExporter
                 settings.LastAutoSyncAt = DateTime.UtcNow;
                 settings.LastPushedHash = ComputeEntriesHash(entries);
                 SavePluginSettings(settings);
+                Task.Run(() => TrySendSpecs(settings));
             }
 
             if (outcome.IsError)
@@ -391,6 +401,194 @@ namespace QueueUpExporter
             }
         }
 
+        /// <summary>
+        /// Tells QueueUp what this PC is (processor, graphics card, memory, Windows version) so its
+        /// "My computer" section can be prefilled. QueueUp only fills fields the person left blank,
+        /// so what they typed there is never changed. Runs after a successful push, off the UI thread,
+        /// only when the specs have changed since the last time they were sent, and never reports an
+        /// error to the user - it is a convenience, not something worth interrupting for. Off if the
+        /// person turned it off from the menu.
+        /// </summary>
+        private void TrySendSpecs(QueueUpConnectionSettings settings)
+        {
+            try
+            {
+                if (!settings.SendSpecsEnabled)
+                {
+                    return;
+                }
+
+                var specs = ReadSystemSpecs();
+                if (specs == null)
+                {
+                    return;
+                }
+
+                var body = Serialization.ToJson(specs);
+                var hash = HashText(body);
+                if (hash == settings.LastSpecsHash)
+                {
+                    return;
+                }
+
+                using (var client = CreateHttpClient(settings))
+                {
+                    var response = client
+                        .PutAsync("api/v1/computer-specs", new StringContent(body, Encoding.UTF8, "application/json"))
+                        .GetAwaiter()
+                        .GetResult();
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        // An older QueueUp without this endpoint answers 404; try again next push.
+                        LogManager.GetLogger().Debug($"QueueUp did not take the PC specs ({(int)response.StatusCode}).");
+                        return;
+                    }
+                }
+
+                settings.LastSpecsHash = hash;
+                SavePluginSettings(settings);
+            }
+            catch (Exception ex)
+            {
+                LogManager.GetLogger().Warn(ex, "Sending PC specs to QueueUp failed.");
+            }
+        }
+
+        /// <summary>
+        /// Reads the processor, graphics card, installed memory and Windows version through WMI.
+        /// Each is read on its own, so one that cannot be read is just left out. Null when nothing
+        /// could be read at all (Playnite on a system without WMI).
+        /// </summary>
+        private static SpecsPayload ReadSystemSpecs()
+        {
+            var specs = new SpecsPayload();
+
+            specs.Cpu = Tidy(WmiFirst("SELECT Name FROM Win32_Processor", "Name"));
+
+            try
+            {
+                // Virtual and basic display adapters (remote desktop, game streaming, the fallback
+                // driver) are skipped; of the rest the one reporting the most memory is taken, which
+                // picks a dedicated card over integrated graphics. AdapterRAM is a 32-bit field and
+                // tops out near 4 GB, so it is only used to rank them, never reported.
+                string bestName = null;
+                long bestRam = -1;
+                using (var searcher = new ManagementObjectSearcher("SELECT Name, AdapterRAM FROM Win32_VideoController"))
+                {
+                    foreach (ManagementBaseObject adapter in searcher.Get())
+                    {
+                        var name = Tidy(adapter["Name"] as string);
+                        if (name == null || IsVirtualAdapter(name))
+                        {
+                            continue;
+                        }
+
+                        var ram = adapter["AdapterRAM"] == null ? 0L : Convert.ToInt64(adapter["AdapterRAM"]);
+                        if (ram > bestRam)
+                        {
+                            bestRam = ram;
+                            bestName = name;
+                        }
+                    }
+                }
+
+                specs.Gpu = bestName;
+            }
+            catch
+            {
+                // left out
+            }
+
+            try
+            {
+                var bytesText = WmiFirst("SELECT TotalPhysicalMemory FROM Win32_ComputerSystem", "TotalPhysicalMemory");
+                if (long.TryParse(bytesText, out var bytes) && bytes > 0)
+                {
+                    // Windows reports a little under what is installed (16 GB shows as 15.9), so round.
+                    specs.RamGb = (int)Math.Round(bytes / 1073741824.0);
+                }
+            }
+            catch
+            {
+                // left out
+            }
+
+            var os = Tidy(WmiFirst("SELECT Caption FROM Win32_OperatingSystem", "Caption"));
+            specs.Os = os == null ? null : (os.StartsWith("Microsoft ", StringComparison.OrdinalIgnoreCase) ? os.Substring("Microsoft ".Length) : os);
+
+            return specs.Cpu == null && specs.Gpu == null && specs.RamGb == null && specs.Os == null ? null : specs;
+        }
+
+        private static readonly string[] VirtualAdapterWords =
+        {
+            "microsoft basic", "remote", "virtual", "parsec", "meta ", "citrix", "vmware", "virtualbox", "hyper-v", "displaylink", "indirect",
+        };
+
+        private static bool IsVirtualAdapter(string name)
+        {
+            var lower = name.ToLowerInvariant();
+            return VirtualAdapterWords.Any(w => lower.Contains(w));
+        }
+
+        private static string WmiFirst(string query, string property)
+        {
+            try
+            {
+                using (var searcher = new ManagementObjectSearcher(query))
+                {
+                    foreach (ManagementBaseObject item in searcher.Get())
+                    {
+                        var value = item[property];
+                        if (value != null)
+                        {
+                            return value.ToString();
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // WMI unavailable or the query refused - the caller leaves this field out.
+            }
+
+            return null;
+        }
+
+        /// <summary>Collapses runs of spaces and trims; null for blank. WMI names carry trailing padding.</summary>
+        private static string Tidy(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return null;
+            }
+
+            var tidy = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
+            return tidy.Length > 120 ? tidy.Substring(0, 120) : tidy;
+        }
+
+        private static string HashText(string text)
+        {
+            using (var sha256 = SHA256.Create())
+            {
+                return Convert.ToBase64String(sha256.ComputeHash(Encoding.UTF8.GetBytes(text)));
+            }
+        }
+
+        private void ToggleSendSpecs(MainMenuItemActionArgs args)
+        {
+            var settings = LoadPluginSettings<QueueUpConnectionSettings>() ?? new QueueUpConnectionSettings();
+            settings.SendSpecsEnabled = !settings.SendSpecsEnabled;
+            // Sent afresh the next time it is switched back on.
+            settings.LastSpecsHash = null;
+            SavePluginSettings(settings);
+
+            PlayniteApi.Dialogs.ShowMessage(
+                settings.SendSpecsEnabled
+                    ? "QueueUp will fill in your PC specs (processor, graphics card, memory, Windows version) under My computer after your next push, only where you have left them blank."
+                    : "PC specs will no longer be sent to QueueUp. What is already in My computer stays until you change it there.",
+                "QueueUp PC specs");
+        }
+
         private const double AutoSyncCooldownHours = 1.0;
 
         /// <summary>
@@ -470,6 +668,7 @@ namespace QueueUpExporter
                     settings.LastAutoSyncAt = DateTime.UtcNow;
                     settings.LastPushedHash = currentHash;
                     SavePluginSettings(settings);
+                    TrySendSpecs(settings);
 
                     PlayniteApi.Notifications.Add(new NotificationMessage(
                         "queueup_exporter_auto_sync",
@@ -848,6 +1047,28 @@ namespace QueueUpExporter
             // TryAutoSync's unchanged-library check simply falls through to the cooldown/push path
             // the first time, same "no prior state to compare against" reasoning as LastAutoSyncAt.
             public string LastPushedHash { get; set; }
+
+            // On by default (same initializer reasoning as AutoSyncEnabled): lets QueueUp prefill the
+            // blank fields of "My computer". Turned off from the @QueueUp menu.
+            public bool SendSpecsEnabled { get; set; } = true;
+
+            // Hash of the specs last accepted by QueueUp, so they are only sent again when they change.
+            public string LastSpecsHash { get; set; }
+        }
+
+        private class SpecsPayload
+        {
+            [SerializationPropertyName("cpu")]
+            public string Cpu { get; set; }
+
+            [SerializationPropertyName("gpu")]
+            public string Gpu { get; set; }
+
+            [SerializationPropertyName("ramGb")]
+            public int? RamGb { get; set; }
+
+            [SerializationPropertyName("os")]
+            public string Os { get; set; }
         }
 
         private class PushOutcome

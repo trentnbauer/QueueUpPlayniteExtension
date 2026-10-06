@@ -77,6 +77,21 @@ to QueueUp` every time something changes:
 - **`Enable Auto-Sync` / `Disable Auto-Sync`** in the `@QueueUp` menu toggles it - on by default once you've
   connected. With it off, pushing is back to a fully manual action via `Push library to QueueUp`.
 
+### 4. PC specs
+
+After a successful push, the extension also tells QueueUp what this PC is, so QueueUp's **My computer** section
+(Profile & settings) can be prefilled:
+
+- **What is sent:** the processor name, graphics card name, installed memory (in GB) and Windows version, read through
+  Windows' own WMI. Nothing else about the machine, and nothing about your games beyond the push itself.
+- **Only blanks are filled.** QueueUp never replaces something you typed under My computer, so you can correct a
+  value and it stays corrected. Graphics cards that are virtual or basic display adapters (remote desktop, game
+  streaming) are ignored, and the one with the most memory is picked when there are several.
+- **Only when it changes:** the specs are sent again only if they differ from what QueueUp last accepted.
+- **Silent:** no dialog, and a failure only goes to Playnite's log. An older QueueUp without the feature simply ignores it.
+- **`Stop sending PC specs to QueueUp` / `Send PC specs to QueueUp`** in the `@QueueUp` menu switches it off or on;
+  it is on by default once you are connected.
+
 ### Exporting to a JSON file (diagnostic)
 
 **`Export library to QueueUp (JSON)`** writes your library to a local file instead of pushing it anywhere - useful for
@@ -112,6 +127,8 @@ Produces `bin/Debug/net462/QueueUpExporter.dll`.
   [issue #4](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/4) for why Playnite 11 isn't supported yet.
 - Pushing to QueueUp auto-syncs on library changes/startup (at most once an hour), or run `Push library to QueueUp`
   by hand any time; `Enable Auto-Sync`/`Disable Auto-Sync` toggles the automatic side.
+- After each successful push it also fills the blank fields of QueueUp's My computer from this PC (see PC specs above);
+  `Stop sending PC specs to QueueUp` switches that off.
 - Exporting or pushing a library where most games have no genres/developers/publishers ([issue #3](https://github.com/trentnbauer/QueueUpPlayniteExtension/issues/3))
   warns that Playnite's "Download Metadata" (Library menu, or right-click a selection) probably hasn't been run yet,
   and lets you cancel or proceed anyway; auto-sync only logs this rather than popping a dialog.
